@@ -1,0 +1,12 @@
+# 统一换行, 避免 bat 在别人机器上出问题
+* text=auto
+
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.c   text eol=crlf
+*.h   text eol=crlf
+*.manifest text eol=crlf
+
+*.png binary
+*.exe binary
+*.hiv binary

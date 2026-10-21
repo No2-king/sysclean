@@ -1,0 +1,32 @@
+# ---- 编译中间产物 ----
+*.obj
+*.pdb
+*.ilk
+*.exp
+*.res
+*.idb
+*.lastbuildstate
+*.tlog
+
+# ---- 运行期产物（每次运行都会重新生成）----
+backup/
+*.hiv
+selftest.txt
+threadtest.txt
+testdelete.txt
+menutest.txt
+menutoggle.txt
+
+# ---- 系统文件 ----
+Thumbs.db
+desktop.ini
+ehthumbs.db
+.DS_Store
+
+# ---- 编辑器 ----
+.vscode/
+.idea/
+*.swp
+*~
+
+# 注意: dist/*.exe 是刻意提交的, 方便不想自己编译的人直接下载
