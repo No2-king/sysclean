@@ -5,7 +5,7 @@
 纯 Win32 原生 C，静态链接，**不依赖 .NET、不依赖任何 VC 运行库**。Win7 / 8 / 8.1 / 10 / 11 直接跑。
 
 ```
-单文件源码  4.8k 行 C  ·  产物 238 KB  ·  零外部依赖  ·  MIT
+单文件源码  4.9k 行 C  ·  产物 240 KB  ·  零外部依赖  ·  MIT
 ```
 
 ![主界面](docs/preview.png)
@@ -130,6 +130,7 @@ sysclean/
 │       ├── shot_all.py           重新生成 README 截图
 │       └── verify_ui.py          不开截图检查界面结构
 ├── LICENSE
+├── CHANGELOG.md                版本记录
 └── README.md
 ```
 
@@ -550,9 +551,9 @@ python src/tools/shot_all.py docs/preview.png docs/preview_proc.png docs/preview
 
 ## 实测记录
 
-在一台 359 进程、53 个已安装程序的机器上跑过：
+在一台 409 进程、52 个已安装程序的机器上跑过：
 
-- **三路扫描**：HKLM 64/32 位视图 + HKCU + AppData，去重合并后 53 个（其中 3 个只存在于 AppData）
+- **三路扫描**：HKLM 64/32 位视图 + HKCU + AppData，去重合并后 52 个（其中 2 个只存在于 AppData）
 - **数据目录匹配**：15 个程序关联到了 AppData 目录，包括 `NetEase\CloudMusic`（厂商目录 + 产品目录的精确匹配）
 - **注册表关联**：7 个服务、28 个启动项、7 个软件项被正确关联到对应程序
 - **路径守卫**：安装目录 16/16、数据目录 8/8、注册表 14/14，全部通过
