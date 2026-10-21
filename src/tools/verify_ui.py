@@ -1,4 +1,4 @@
-"""检查 SysClean 界面结构是否正确 (不截图, 直接读控件属性)。
+"""检查 SysClean 三标签页界面结构是否正确 (不截图, 直接读控件属性)。
 
 比截图更可靠: 能读到列表实际行数、表头列数、按钮位置、控件是否越界。
 需要先编译出 dist\\SysClean.exe。会弹 UAC, 点「是」即可。
@@ -16,9 +16,14 @@ LVM_GETHEADER = 0x1000 + 31
 HDM_GETITEMCOUNT = 0x1200
 BM_CLICK = 0x00F5
 WM_CLOSE = 0x0010
+WM_LBUTTONDOWN = 0x0201
+WM_LBUTTONUP = 0x0202
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 EXE = os.path.join(HERE, '..', '..', 'dist', 'SysClean.exe')
+
+# 与源码 LayoutControls 一致
+TAB_X0, TAB_W, TAB_GAP, TAB_CY = 250, 110, 8, 38
 
 fails = []
 
@@ -68,16 +73,13 @@ def find_windows(c):
 
 
 def rect(h, parent=None):
-    """返回控件相对 parent 客户区的 (l, t, r, b)"""
     r = wintypes.RECT()
     user32.GetWindowRect(h, ctypes.byref(r))
     if parent:
         pt = wintypes.POINT()
         pt.x, pt.y = r.left, r.top
         user32.ScreenToClient(parent, ctypes.byref(pt))
-        r2 = wintypes.RECT()
-        user32.GetWindowRect(h, ctypes.byref(r2))
-        return (pt.x, pt.y, pt.x + (r2.right - r2.left), pt.y + (r2.bottom - r2.top))
+        return (pt.x, pt.y, pt.x + (r.right - r.left), pt.y + (r.bottom - r.top))
     return (r.left, r.top, r.right, r.bottom)
 
 
@@ -85,192 +87,182 @@ def visible(h):
     return bool(user32.IsWindowVisible(h))
 
 
+def click_tab(hwnd, idx):
+    x = TAB_X0 + idx * (TAB_W + TAB_GAP) + TAB_W // 2
+    lp = (TAB_CY << 16) | x
+    user32.SendMessageW(hwnd, WM_LBUTTONDOWN, 1, lp)
+    user32.SendMessageW(hwnd, WM_LBUTTONUP, 0, lp)
+
+
+def no_dialog(msg):
+    dlg = find_windows('#32770')
+    check(len(dlg) == 0, msg)
+    for d in dlg:
+        user32.PostMessageW(d, WM_CLOSE, 0, 0)
+
+
 def main():
     if not os.path.exists(EXE):
         sys.exit('not built yet: %s' % EXE)
 
     ctypes.windll.shell32.ShellExecuteW(None, 'runas', EXE, None, None, 1)
-    time.sleep(6)
+    time.sleep(7)
 
     mains = find_windows('SysCleanWnd')
     if not mains:
         sys.exit('main window did not appear')
-    main_wnd = mains[0]
+    mw = mains[0]
 
     cr = wintypes.RECT()
-    user32.GetClientRect(main_wnd, ctypes.byref(cr))
+    user32.GetClientRect(mw, ctypes.byref(cr))
     cw, ch = cr.right, cr.bottom
-    print('main window  : %s  client %dx%d' % (text(main_wnd), cw, ch))
+    print('main window  : %s  client %dx%d' % (text(mw), cw, ch))
     print()
 
-    # ---- 按钮 ----
-    allk = kids(main_wnd)
+    allk = kids(mw)
     btns = [k for k in allk if cls(k) == 'SysCleanBtn']
-    shown = [k for k in btns if visible(k)]
-    print('buttons total=%d visible=%d' % (len(btns), len(shown)))
-    for k in shown:
-        r = rect(k, main_wnd)
+    lvs = [k for k in allk if cls(k) == 'SysListView32']
+    eds = [k for k in allk if cls(k) == 'Edit']
+    sts = [k for k in allk if cls(k) == 'Static']
+
+    print('controls: buttons=%d listview=%d edit=%d static=%d'
+          % (len(btns), len(lvs), len(eds), len(sts)))
+
+    # 三个页面共 4+2(自身) + 5(进程) + 4(菜单) = 15 个自绘按钮
+    check(len(btns) == 15, '共 15 个自绘按钮 (自身 4+2 / 进程 5 / 菜单 4)')
+    check(len(lvs) == 4, '共 4 个 ListView (程序 / 进程 / 线程 / 菜单)')
+    check(len(eds) == 1, '1 个日志 Edit')
+    check(len(sts) == 2, '2 个提示条 STATIC (进程页 / 菜单页)')
+
+    # ---- 第 1 页: 自身功能 ----
+    print()
+    print('--- 第 1 页 自身功能 ---')
+    click_tab(mw, 0)
+    time.sleep(1.2)
+    vis_btn = [k for k in btns if visible(k)]
+    vis_lv = [k for k in lvs if visible(k)]
+    vis_ed = [k for k in eds if visible(k)]
+    print('visible buttons=%d listview=%d edit=%d'
+          % (len(vis_btn), len(vis_lv), len(vis_ed)))
+    for k in vis_btn:
+        r = rect(k, mw)
         print('   %-10s x=%4d y=%4d w=%3d h=%2d' %
               (text(k), r[0], r[1], r[2] - r[0], r[3] - r[1]))
-    print()
 
-    check(len(btns) == 8, '应有 8 个自绘按钮 (6 操作 + 2 确认)')
-    check(len(shown) == 6, '初始只显示 6 个操作按钮, 确认按钮应隐藏')
+    check(len(vis_btn) == 4, '自身功能页 4 个按钮 (确认/取消默认隐藏)')
+    check(len(vis_lv) == 1, '自身功能页 1 个 ListView')
+    check(len(vis_ed) == 1, '自身功能页显示日志')
 
-    # 操作按钮必须都在底部操作栏
-    if shown:
-        maxbottom = max(rect(k, main_wnd)[3] for k in shown)
-        check(maxbottom > ch - 80, '操作按钮位于窗口底部 (底部 y=%d, 客户区高=%d)' % (maxbottom, ch))
-        allin = all(rect(k, main_wnd)[0] >= 0 and rect(k, main_wnd)[2] <= cw for k in shown)
-        check(allin, '所有按钮水平不越界')
+    if vis_btn:
+        maxb = max(rect(k, mw)[3] for k in vis_btn)
+        check(maxb > ch - 80, '操作按钮位于窗口底部 (y=%d, 高=%d)' % (maxb, ch))
+        check(all(rect(k, mw)[0] >= 0 and rect(k, mw)[2] <= cw for k in vis_btn),
+              '所有按钮水平不越界')
 
-    # ---- 列表 ----
-    lv = [k for k in allk if cls(k) == 'SysListView32']
-    check(len(lv) == 1, '主窗口有 1 个 ListView')
-    if lv:
-        rows = user32.SendMessageW(lv[0], LVM_GETITEMCOUNT, 0, 0)
-        hdr = user32.SendMessageW(lv[0], LVM_GETHEADER, 0, 0)
+    if vis_lv:
+        rows = user32.SendMessageW(vis_lv[0], LVM_GETITEMCOUNT, 0, 0)
+        hdr = user32.SendMessageW(vis_lv[0], LVM_GETHEADER, 0, 0)
         cols = user32.SendMessageW(hdr, HDM_GETITEMCOUNT, 0, 0)
-        r = rect(lv[0], main_wnd)
-        print()
-        print('listview rows=%d cols=%d  x=%d y=%d w=%d h=%d' %
-              (rows, cols, r[0], r[1], r[2] - r[0], r[3] - r[1]))
-        check(rows > 0, '列表已填充数据 (rows=%d)' % rows)
-        check(cols == 7, '列表有 7 列')
+        r = rect(vis_lv[0], mw)
+        print('program list rows=%d cols=%d x=%d y=%d w=%d h=%d'
+              % (rows, cols, r[0], r[1], r[2] - r[0], r[3] - r[1]))
+        check(rows > 0, '程序列表已填充 (rows=%d)' % rows)
+        check(cols == 7, '程序列表 7 列')
         check(r[0] > 0 and r[1] > 0 and r[2] <= cw and r[3] <= ch, '列表在客户区内')
         check(r[3] < ch - 80, '列表不压到底部操作栏')
 
-    # ---- 日志 ----
-    ed = [k for k in allk if cls(k) == 'Edit']
-    check(len(ed) == 1, '主窗口有 1 个日志 Edit')
-    if ed:
-        r = rect(ed[0], main_wnd)
-        print('log edit    x=%d y=%d w=%d h=%d' % (r[0], r[1], r[2] - r[0], r[3] - r[1]))
-        check(r[1] > rect(lv[0], main_wnd)[3] if lv else True, '日志在列表下方')
-
-    # ---- 无弹窗验证: 点「卸载选中」未勾选时不应出现对话框 ----
-    uninst = [k for k in btns if '卸载选中' in text(k)]
+    # 未勾选时点卸载 -> 不弹窗, 进入内嵌确认
+    uninst = [k for k in vis_btn if '卸载选中' in text(k)]
     if uninst:
         user32.SendMessageW(uninst[0], BM_CLICK, 0, 0)
-        time.sleep(1)
-        dlg = find_windows('#32770')     # 标准对话框类名
-        check(len(dlg) == 0, '未勾选时点卸载不弹对话框')
-        for d in dlg:
-            user32.PostMessageW(d, WM_CLOSE, 0, 0)
+        time.sleep(0.8)
+        no_dialog('未勾选时点卸载不弹对话框')
 
-    # ---- 右键菜单窗口 ----
-    target = [k for k in btns if '右键菜单' in text(k)]
-    if target:
-        user32.SendMessageW(target[0], BM_CLICK, 0, 0)
-        time.sleep(3)
-        menus = find_windows('SysCleanMenuWnd')
-        check(bool(menus), '右键菜单窗口能打开')
-        if menus:
-            mw = menus[0]
-            mk = kids(mw)
-            mlv = [k for k in mk if cls(k) == 'SysListView32']
-            mbtn = [k for k in mk if cls(k) == 'SysCleanBtn']
-            minfo = [k for k in mk if cls(k) == 'Static']
+    # ---- 第 2 页: 进程管理 ----
+    print()
+    print('--- 第 2 页 进程管理 ---')
+    click_tab(mw, 1)
+    time.sleep(2.5)
+    vis_btn = [k for k in btns if visible(k)]
+    vis_lv = [k for k in lvs if visible(k)]
+    vis_st = [k for k in sts if visible(k)]
+    print('visible buttons=%d listview=%d static=%d'
+          % (len(vis_btn), len(vis_lv), len(vis_st)))
+    check(len(vis_btn) == 5, '进程管理页 5 个按钮')
+    check(len(vis_lv) == 2, '进程管理页 2 个 ListView (进程 / 线程)')
+    check(len(vis_st) == 1, '进程管理页 1 个提示条')
+    check(len([k for k in eds if visible(k)]) == 0, '进程管理页不显示日志框')
 
-            print('menu window  buttons=%d listview=%d static=%d' %
-                  (len(mbtn), len(mlv), len(minfo)))
-            check(len(mbtn) == 4, '菜单窗口 4 个自绘按钮')
-            check(len(mlv) == 1, '菜单窗口 1 个 ListView')
-            check(len(minfo) == 1, '菜单窗口 1 个提示条 (替代弹窗)')
+    if len(vis_lv) == 2:
+        for i, name in enumerate(('进程', '线程')):
+            n = user32.SendMessageW(vis_lv[i], LVM_GETITEMCOUNT, 0, 0)
+            hdr = user32.SendMessageW(vis_lv[i], LVM_GETHEADER, 0, 0)
+            c = user32.SendMessageW(hdr, HDM_GETITEMCOUNT, 0, 0)
+            print('  %s list rows=%d cols=%d' % (name, n, c))
+            check(n > 0, '%s列表有数据 (rows=%d)' % (name, n))
+        check(user32.SendMessageW(user32.SendMessageW(vis_lv[0], LVM_GETHEADER, 0, 0),
+                                  HDM_GETITEMCOUNT, 0, 0) == 8, '进程列表 8 列')
+        check(user32.SendMessageW(user32.SendMessageW(vis_lv[1], LVM_GETHEADER, 0, 0),
+                                  HDM_GETITEMCOUNT, 0, 0) == 7, '线程列表 7 列')
 
-            if mlv:
-                mrows = user32.SendMessageW(mlv[0], LVM_GETITEMCOUNT, 0, 0)
-                mhdr = user32.SendMessageW(mlv[0], LVM_GETHEADER, 0, 0)
-                mcols = user32.SendMessageW(mhdr, HDM_GETITEMCOUNT, 0, 0)
-                print('menu list    rows=%d cols=%d' % (mrows, mcols))
-                check(mrows > 0 and mcols == 6, '右键菜单列表 6 列且有数据')
+        if vis_btn:
+            tb = min(rect(k, mw)[1] for k in vis_btn)
+            check(rect(vis_lv[1], mw)[3] <= tb, '线程列表不压到底部按钮')
 
-            # 按钮必须在窗口底部, 列表在按钮上方
-            mcr = wintypes.RECT()
-            user32.GetClientRect(mw, ctypes.byref(mcr))
-            mch = mcr.bottom
-            if mbtn and mlv:
-                mb = max(rect(k, mw)[3] for k in mbtn)
-                lr = rect(mlv[0], mw)
-                check(mb > mch - 80, '菜单窗口按钮在底部 (y=%d, 高=%d)' % (mb, mch))
-                check(lr[3] < mb, '菜单窗口列表在按钮上方')
+    # 未选中线程时点结束线程 -> 提示条, 不弹窗
+    tkill = [k for k in vis_btn if '结束线程' in text(k)]
+    if tkill and vis_st:
+        user32.SendMessageW(tkill[0], BM_CLICK, 0, 0)
+        time.sleep(0.6)
+        info = text(vis_st[0])
+        print('thread info  %r' % info)
+        no_dialog('结束线程未选中时不弹对话框')
+        check('选中' in info, '结束线程未选中时提示条给出引导')
 
-            # 未选中时点「删除选中」→ 只在提示条显示, 不弹窗
-            mdel = [k for k in mbtn if '删除选中' in text(k)]
-            if mdel and minfo:
-                user32.SendMessageW(mdel[0], BM_CLICK, 0, 0)
-                time.sleep(0.6)
-                info_txt = text(minfo[0])
-                print('menu info    %r' % info_txt)
-                check(len(find_windows('#32770')) == 0, '删除未选中项时不弹对话框')
-                check('选中' in info_txt, '删除未选中项时提示条给出引导')
+    # ---- 第 3 页: 右键菜单 ----
+    print()
+    print('--- 第 3 页 右键菜单 ---')
+    click_tab(mw, 2)
+    time.sleep(2.5)
+    vis_btn = [k for k in btns if visible(k)]
+    vis_lv = [k for k in lvs if visible(k)]
+    vis_st = [k for k in sts if visible(k)]
+    print('visible buttons=%d listview=%d static=%d'
+          % (len(vis_btn), len(vis_lv), len(vis_st)))
+    check(len(vis_btn) == 4, '右键菜单页 4 个按钮')
+    check(len(vis_lv) == 1, '右键菜单页 1 个 ListView')
+    check(len(vis_st) == 1, '右键菜单页 1 个提示条')
 
-                # 选中第一行再点删除 → 应进入「再点一次确认」, 而不是直接删
-                # 注意: 必须点在文字列上。x 落在最左边的复选框列会真的切换
-                # 该项的启用状态 (直接改注册表), 回归脚本不能碰那里。
-                user32.PostMessageW(mlv[0], 0x0201, 1, 300 | (45 << 16))   # WM_LBUTTONDOWN
-                user32.PostMessageW(mlv[0], 0x0202, 0, 300 | (45 << 16))   # WM_LBUTTONUP
-                time.sleep(0.4)
-                user32.SendMessageW(mdel[0], BM_CLICK, 0, 0)
-                time.sleep(0.6)
-                info_txt = text(minfo[0])
-                print('menu confirm %r' % info_txt)
-                check('再点一次' in info_txt, '第一次点删除只要求二次确认')
-                check(len(find_windows('#32770')) == 0, '二次确认过程不弹对话框')
+    if vis_lv:
+        rows = user32.SendMessageW(vis_lv[0], LVM_GETITEMCOUNT, 0, 0)
+        hdr = user32.SendMessageW(vis_lv[0], LVM_GETHEADER, 0, 0)
+        cols = user32.SendMessageW(hdr, HDM_GETITEMCOUNT, 0, 0)
+        print('menu list rows=%d cols=%d' % (rows, cols))
+        check(rows > 0 and cols == 6, '右键菜单列表 6 列且有数据')
 
-            user32.PostMessageW(mw, WM_CLOSE, 0, 0)
+    # 未选中时点删除 -> 提示条, 不弹窗
+    mdel = [k for k in vis_btn if '删除选中' in text(k)]
+    if mdel and vis_st:
+        user32.SendMessageW(mdel[0], BM_CLICK, 0, 0)
+        time.sleep(0.6)
+        info = text(vis_st[0])
+        print('menu info    %r' % info)
+        no_dialog('删除未选中项时不弹对话框')
+        check('选中' in info, '删除未选中项时提示条给出引导')
+
+        # 选中一行再点删除 -> 应进入「再点一次确认」
+        # 注意: 必须点在文字列上。x 落在最左边的复选框列会真的切换
+        # 该项的启用状态 (直接改注册表), 回归脚本不能碰那里。
+        if vis_lv:
+            user32.PostMessageW(vis_lv[0], WM_LBUTTONDOWN, 1, 300 | (45 << 16))
+            user32.PostMessageW(vis_lv[0], WM_LBUTTONUP, 0, 300 | (45 << 16))
+            time.sleep(0.4)
+            user32.SendMessageW(mdel[0], BM_CLICK, 0, 0)
             time.sleep(0.6)
-
-    # ---- 线程窗口 ----
-    tgt = [k for k in btns if '进程与线程' in text(k)]
-    if tgt:
-        user32.SendMessageW(tgt[0], BM_CLICK, 0, 0)
-        time.sleep(3)
-        tws = find_windows('SysCleanThreadWnd')
-        check(bool(tws), '线程窗口能打开')
-        if tws:
-            tw = tws[0]
-            tk = kids(tw)
-            tlv = [k for k in tk if cls(k) == 'SysListView32']
-            tbtn = [k for k in tk if cls(k) == 'SysCleanBtn']
-            tinfo = [k for k in tk if cls(k) == 'Static']
-            print('thread window buttons=%d listview=%d static=%d' %
-                  (len(tbtn), len(tlv), len(tinfo)))
-            check(len(tbtn) == 5, '线程窗口 5 个自绘按钮')
-            check(len(tlv) == 2, '线程窗口 2 个 ListView (进程 / 线程)')
-            check(len(tinfo) == 1, '线程窗口 1 个提示条 (替代弹窗)')
-
-            if len(tlv) == 2:
-                for i, name in enumerate(('进程', '线程')):
-                    n = user32.SendMessageW(tlv[i], LVM_GETITEMCOUNT, 0, 0)
-                    hdr = user32.SendMessageW(tlv[i], LVM_GETHEADER, 0, 0)
-                    c = user32.SendMessageW(hdr, HDM_GETITEMCOUNT, 0, 0)
-                    print('  %s list rows=%d cols=%d' % (name, n, c))
-                    check(n > 0, '%s列表有数据 (rows=%d)' % (name, n))
-                check(user32.SendMessageW(tlv[0], LVM_GETHEADER, 0, 0) and
-                      user32.SendMessageW(user32.SendMessageW(tlv[0], LVM_GETHEADER, 0, 0),
-                                          HDM_GETITEMCOUNT, 0, 0) == 8, '进程列表 8 列')
-                check(user32.SendMessageW(user32.SendMessageW(tlv[1], LVM_GETHEADER, 0, 0),
-                                          HDM_GETITEMCOUNT, 0, 0) == 7, '线程列表 7 列')
-
-            # 未选中线程时点「结束线程」→ 提示条, 不弹窗
-            tkill = [k for k in tbtn if '结束线程' in text(k)]
-            if tkill and tinfo:
-                user32.SendMessageW(tkill[0], BM_CLICK, 0, 0)
-                time.sleep(0.6)
-                info_txt = text(tinfo[0])
-                print('thread info  %r' % info_txt)
-                check(len(find_windows('#32770')) == 0, '结束线程未选中时不弹对话框')
-                check('选中' in info_txt, '结束线程未选中时提示条给出引导')
-
-            # 两个列表都不能压到底部按钮
-            tcr = wintypes.RECT()
-            user32.GetClientRect(tw, ctypes.byref(tcr))
-            if tbtn and len(tlv) == 2:
-                tb = min(rect(k, tw)[1] for k in tbtn)
-                check(rect(tlv[1], tw)[3] <= tb, '线程列表不压到底部按钮')
-
-            user32.PostMessageW(tw, WM_CLOSE, 0, 0)
+            info = text(vis_st[0])
+            print('menu confirm %r' % info)
+            check('再点一次' in info, '第一次点删除只要求二次确认')
+            no_dialog('二次确认过程不弹对话框')
 
     print()
     if fails:
@@ -278,7 +270,7 @@ def main():
     else:
         print('RESULT: PASS')
 
-    user32.PostMessageW(main_wnd, WM_CLOSE, 0, 0)
+    user32.PostMessageW(mw, WM_CLOSE, 0, 0)
     return 0 if not fails else 1
 
 

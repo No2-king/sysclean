@@ -51,8 +51,6 @@
 #define ID_BTN_KILL     1011
 #define ID_BTN_UNINST   1012
 #define ID_BTN_BACKUP   1013
-#define ID_BTN_THREADS  1014
-#define ID_BTN_MENU     1015
 #define ID_BTN_CONFIRM  1016
 #define ID_BTN_CANCEL   1017
 
@@ -204,7 +202,22 @@ static int   g_statProgs, g_statProcs, g_statSel;
 static BOOL  g_isAdmin;
 static BOOL  g_noGlass;              /* /noglass: 关掉分层透明, 供截图用 */
 static RECT  g_rcStatCard, g_rcListCard, g_rcLogCard, g_rcActionBar, g_rcTopBar;
-static HWND  g_hBtns[6];
+
+/* ---------------- 三个标签页 ---------------- */
+#define PAGE_SELF     0
+#define PAGE_PROC     1
+#define PAGE_MENU     2
+#define N_SELF_BTN    4      /* 自身功能页底部按钮数 */
+
+static int   g_page = PAGE_SELF;
+static int   g_tabHot = -1;
+static BOOL  g_procLoaded, g_menuLoaded;   /* 耗时扫描只在首次进入该页时做 */
+static RECT  g_rcTabs[3];
+static RECT  g_rcProcCard, g_rcThrCard, g_rcMenuCard;
+
+static HWND  g_hBtns[N_SELF_BTN];
+static HWND  g_hPBtns[5];            /* 进程管理页 */
+static HWND  g_hMBtns[4];            /* 右键菜单页 */
 static HWND  g_hBtnConfirm, g_hBtnCancel;
 static HWND  g_hWarnStatic;          /* 提示条当前是否要用红色显示 */
 
@@ -213,9 +226,8 @@ static int   g_mConfirmRow = -1;
 static int   g_tConfirmTid;
 static DWORD g_confirmTick;
 
-/* 线程窗口 */
-static HWND g_hTwnd, g_hTProc, g_hTThread, g_hTInfo;
-static BOOL g_twndOpen;
+/* 进程管理页的列表 */
+static HWND g_hTProc, g_hTThread, g_hTInfo;
 
 /* NtQueryInformationThread —— 拿线程起始地址, 官方 API 没有对应函数 */
 typedef LONG (NTAPI *PFN_NtQIT)(HANDLE, ULONG, PVOID, ULONG, PULONG);
@@ -234,48 +246,55 @@ static void ExecuteUninstall(void);
 static void ExecuteKillAll(void);
 static void HookHeader(HWND lv);
 static void StyleListView(HWND lv);
+static void FitLastColumn(HWND lv, int lastIdx, int fixedSum);
+static int  SnapListHeight(HWND lv, int want);
+static void LayoutControls(HWND hwnd);
+static void SwitchPage(int page);
 static LRESULT HandleListCustomDraw(HWND lv, LPNMLVCUSTOMDRAW cd);
 static void ApplyTitleBarColor(HWND hwnd);
 
 /* ============================================================
- * UI 主题 —— 蓝色 / 轻微透明 / 卡片式单模块
+ * UI 主题 —— 深蓝玻璃 / 轻微透明 / 单窗口三标签页
  *
  * 设计约束:
  *   1. 全部自绘, 不用系统默认控件外观, 才能做到视觉统一
- *   2. 整个窗口是一个圆角模块, 内部用卡片分区块
- *   3. 操作按钮统一沉到底部操作栏
- *   4. 不弹任何对话框, 确认走底部内嵌确认条
+ *   2. 整窗统一深蓝色调, 没有白底区块
+ *   3. 顶部三个标签页 (自身功能 / 进程管理 / 右键菜单), 点击切换下方内容
+ *   4. 操作按钮统一沉到底部操作栏
+ *   5. 不弹任何对话框, 确认走底部内嵌确认条
  * ============================================================ */
 
-/* 底色与卡片 */
-#define C_BG          RGB(0xEA, 0xF1, 0xFB)   /* 窗口底色: 淡蓝灰 */
-#define C_CARD        RGB(0xFF, 0xFF, 0xFF)   /* 卡片白 */
-#define C_CARD_ROW    RGB(0xF8, 0xFB, 0xFF)   /* 列表交替行 */
-#define C_BORDER      RGB(0xD2, 0xE1, 0xF6)   /* 卡片描边 */
-#define C_SHADOW      RGB(0xDD, 0xE8, 0xF7)   /* 卡片投影 */
+/* 底色与卡片 (深蓝) */
+#define C_BG          RGB(0x0E, 0x24, 0x40)   /* 窗口底色 */
+#define C_CARD        RGB(0x16, 0x34, 0x5C)   /* 卡片 */
+#define C_CARD_ROW    RGB(0x1A, 0x3B, 0x67)   /* 列表交替行 */
+#define C_BORDER      RGB(0x26, 0x50, 0x7F)   /* 卡片描边 */
+#define C_SHADOW      RGB(0x0A, 0x1B, 0x31)   /* 卡片投影 */
 
 /* 蓝色系 */
-#define C_BLUE        RGB(0x1F, 0x6F, 0xEB)   /* 主蓝 */
-#define C_BLUE_HOVER  RGB(0x3B, 0x86, 0xF0)
-#define C_BLUE_DOWN   RGB(0x15, 0x59, 0xC2)
-#define C_BLUE_DEEP   RGB(0x0C, 0x38, 0x74)   /* 顶栏深蓝 */
-#define C_BLUE_DEEP2  RGB(0x14, 0x55, 0xA8)
-#define C_BLUE_SOFT   RGB(0xE7, 0xF0, 0xFD)   /* 浅蓝底 */
-#define C_BLUE_LINE   RGB(0xC2, 0xDA, 0xF8)
+#define C_BLUE        RGB(0x3B, 0x8C, 0xF5)   /* 主蓝 */
+#define C_BLUE_HOVER  RGB(0x55, 0x9D, 0xF7)
+#define C_BLUE_DOWN   RGB(0x2A, 0x72, 0xD4)
+#define C_BLUE_DEEP   RGB(0x0A, 0x1E, 0x38)   /* 顶栏深蓝 */
+#define C_BLUE_DEEP2  RGB(0x10, 0x36, 0x5F)
+#define C_BLUE_SOFT   RGB(0x1D, 0x42, 0x70)   /* 深底上的"浅蓝"层 */
+#define C_BLUE_LINE   RGB(0x2C, 0x5C, 0x93)
 
 /* 文字 */
-#define C_TEXT        RGB(0x16, 0x28, 0x3D)
-#define C_TEXT_SUB    RGB(0x63, 0x78, 0x94)
-#define C_TEXT_MUTED  RGB(0x97, 0xA8, 0xBD)
+#define C_TEXT        RGB(0xE8, 0xF1, 0xFC)
+#define C_TEXT_SUB    RGB(0x9B, 0xB8, 0xD8)
+#define C_TEXT_MUTED  RGB(0x6E, 0x8C, 0xB0)
 #define C_TEXT_ON     RGB(0xFF, 0xFF, 0xFF)
+#define C_HEAD_TXT    RGB(0xAF, 0xCE, 0xF2)   /* 表头文字 */
 
 /* 语义色 */
-#define C_OK          RGB(0x18, 0x92, 0x50)
-#define C_WARN        RGB(0xBE, 0x71, 0x00)
-#define C_DANGER      RGB(0xD2, 0x3A, 0x3A)
+#define C_OK          RGB(0x35, 0xC0, 0x78)
+#define C_WARN        RGB(0xE8, 0xA3, 0x3D)
+#define C_DANGER      RGB(0xE5, 0x54, 0x4B)
 
 /* 尺寸 */
-#define TOPBAR_H      64
+#define TOPBAR_H      76
+#define TAB_H         34
 #define STATCARD_H    76
 #define ACTIONBAR_H   68
 #define LOGCARD_H     148
@@ -283,10 +302,6 @@ static void ApplyTitleBarColor(HWND hwnd);
 #define CARD_GAP      12
 #define CARD_R        8
 #define CARD_HEAD_H   34
-
-/* 子窗口 (线程 / 右键菜单) 的通用尺寸 */
-#define SUBTOP_H      54
-#define SUBBAR_H       58
 
 static HFONT g_hFontBold, g_hFontTitle, g_hFontSmall, g_hFontNum;
 
@@ -480,20 +495,20 @@ static LRESULT CALLBACK BtnProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         FillRect(hdc, &rc, UiBrush(C_BG));
 
         if (!IsWindowEnabled(hwnd)) {
-            fill = RGB(0xEE, 0xF3, 0xFA);
+            fill = RGB(0x1A, 0x30, 0x4C);
             txt = C_TEXT_MUTED;
             bord = C_BORDER;
         } else if (b && b->kind == 1) {
             fill = b->down ? C_BLUE_DOWN : (b->hot ? C_BLUE_HOVER : C_BLUE);
             txt = C_TEXT_ON;
         } else if (b && b->kind == 2) {
-            fill = b->down ? RGB(0xAE, 0x2C, 0x2C)
-                 : (b->hot ? RGB(0xE2, 0x54, 0x54) : C_DANGER);
+            fill = b->down ? RGB(0xB8, 0x3C, 0x35)
+                 : (b->hot ? RGB(0xF2, 0x6B, 0x62) : C_DANGER);
             txt = C_TEXT_ON;
         } else {
             fill = b->down ? C_BLUE_SOFT
-                 : (b->hot ? RGB(0xF3, 0xF8, 0xFF) : C_CARD);
-            txt = C_BLUE;
+                 : (b->hot ? RGB(0x22, 0x4C, 0x80) : C_CARD);
+            txt = C_HEAD_TXT;
             bord = C_BLUE_LINE;
         }
 
@@ -2356,7 +2371,11 @@ static void DoScan(void)
             hint[0] = 0;
         wcsncpy_s(g_statHint, _countof(g_statHint), hint, _TRUNCATE);
     }
-    if (g_hMain) InvalidateRect(g_hMain, NULL, FALSE);
+    /* 列表填完数据才知道真实行高, 重排一次把最后一行对齐 */
+    if (g_hMain) {
+        LayoutControls(g_hMain);
+        InvalidateRect(g_hMain, NULL, FALSE);
+    }
 }
 
 /* ============================================================
@@ -2659,7 +2678,7 @@ static BOOL IndirectIsSystem(LPCWSTR s)
     return TRUE;
 }
 
-static HWND g_hMwnd, g_hMList, g_hMInfo;
+static HWND g_hMList, g_hMInfo;
 static BOOL g_mFilling;
 
 static void ReadClsidInfo(LPCWSTR clsid, LPWSTR name, size_t ncch, LPWSTR dll, size_t dcch)
@@ -2699,6 +2718,17 @@ static BOOL IsSystemPath(LPCWSTR p)
 static BOOL IsSystemCmd(LPCWSTR cmd)
 {
     return IsSystemPath(cmd);
+}
+
+/* 有些键名带不可见控制字符 (实测某键名开头有 4 个 \x01),
+   直接显示会变成豆腐块。只清洗显示名, 注册表路径保持原样。 */
+static void CleanDisplayName(LPWSTR s)
+{
+    LPWSTR d = s;
+
+    for (; *s; s++)
+        if ((unsigned)*s >= 0x20) *d++ = *s;
+    *d = 0;
 }
 
 static void ScanMenuKey(LPCWSTR basePath, LPCWSTR scope, BOOL shellex)
@@ -2750,6 +2780,7 @@ static void ScanMenuKey(LPCWSTR basePath, LPCWSTR scope, BOOL shellex)
             ReadClsidInfo(m->clsid, cname, _countof(cname), dll, _countof(dll));
             wcsncpy_s(m->cmd, MAX_PL, dll, _TRUNCATE);
             wcsncpy_s(m->name, _countof(m->name), cname[0] ? cname : leaf, _TRUNCATE);
+            CleanDisplayName(m->name);
         } else {
             WCHAR tmp[256] = L"", cmdKey[MAX_PL];
             DWORD sz = 0;
@@ -2788,6 +2819,7 @@ static void ScanMenuKey(LPCWSTR basePath, LPCWSTR scope, BOOL shellex)
                 continue;
             }
             wcsncpy_s(m->name, _countof(m->name), tmp[0] ? tmp : leaf, _TRUNCATE);
+            CleanDisplayName(m->name);
         }
 
         m->system = IsSystemCmd(m->cmd) || indirSys;
@@ -2898,6 +2930,7 @@ static void RefreshMenuList(void)
         L"共 %d 项 · 已禁用 %d 项 · 第三方 %d 项 (勾选=启用, 取消勾选=禁用)",
         g_menuCount, off, third);
     SubInfo(g_hMInfo, info, FALSE);
+    if (g_hMain) LayoutControls(g_hMain);
 }
 
 /* 命令行自检: SysClean.exe /menutest —— 不开 GUI 验证扫描与开关逻辑 */
@@ -3076,9 +3109,8 @@ static void OnMenuDelete(void)
     }
 }
 
-static RECT g_rcMList, g_rcMBar;
-
-static void CreateMenuControls(HWND hwnd)
+/* ---------- 第 3 页: 右键菜单 ---------- */
+static void CreateMenuPage(HWND hwnd)
 {
     static const WCHAR *btn[] = {
         L"刷新", L"切换启用", L"删除选中", L"打开备份目录"
@@ -3090,7 +3122,7 @@ static void CreateMenuControls(HWND hwnd)
     int i;
 
     g_hMList = CreateWindowExW(0, WC_LISTVIEWW, L"",
-        WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS,
+        WS_CHILD | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS,
         0, 0, 100, 100, hwnd, (HMENU)ID_M_LIST, NULL, NULL);
 
     ListView_SetExtendedListViewStyle(g_hMList,
@@ -3115,199 +3147,49 @@ static void CreateMenuControls(HWND hwnd)
     }
 
     for (i = 0; i < 4; i++)
-        UiButton(hwnd, btnId[i], btn[i], btnKind[i], 0, 0, 10, 10);
+        g_hMBtns[i] = UiButton(hwnd, btnId[i], btn[i], btnKind[i], 0, 0, 10, 10);
 
     g_hMInfo = CreateWindowExW(0, L"STATIC", L"就绪",
-        WS_CHILD | WS_VISIBLE | SS_LEFT | SS_ENDELLIPSIS,
+        WS_CHILD | SS_LEFT | SS_ENDELLIPSIS,
         0, 0, 100, 20, hwnd, (HMENU)ID_M_INFO, NULL, NULL);
 
     SendMessageW(g_hMList, WM_SETFONT, (WPARAM)g_hFont, TRUE);
     SendMessageW(g_hMInfo, WM_SETFONT, (WPARAM)g_hFontSmall, TRUE);
 }
 
-static void LayoutMenuControls(HWND hwnd)
+static void LayoutMenuPage(int w, int h)
 {
     static const int bw[] = { 84, 100, 100, 124 };
-    RECT rc;
-    int w, h, i, total, x, listTop, listBottom;
+    int i, total, x, top, bottom;
 
-    GetClientRect(hwnd, &rc);
-    w = rc.right;
-    h = rc.bottom;
+    top = TOPBAR_H + UI_PAD;
+    bottom = h - ACTIONBAR_H - UI_PAD;
+    if (bottom < top + CARD_HEAD_H + 60) bottom = top + CARD_HEAD_H + 60;
+    SetRect(&g_rcMenuCard, UI_PAD, top, w - UI_PAD, bottom);
 
-    listTop = SUBTOP_H + UI_PAD;
-    listBottom = h - SUBBAR_H - UI_PAD;
-    if (listBottom < listTop + CARD_HEAD_H + 40)
-        listBottom = listTop + CARD_HEAD_H + 40;
-
-    SetRect(&g_rcMList, UI_PAD, listTop, w - UI_PAD, listBottom);
     MoveWindow(g_hMList,
-        g_rcMList.left + 2, g_rcMList.top + CARD_HEAD_H + 2,
-        g_rcMList.right - g_rcMList.left - 4,
-        g_rcMList.bottom - g_rcMList.top - CARD_HEAD_H - 4, TRUE);
-
-    SetRect(&g_rcMBar, 0, h - SUBBAR_H, w, h);
+        g_rcMenuCard.left + 2, g_rcMenuCard.top + CARD_HEAD_H + 2,
+        g_rcMenuCard.right - g_rcMenuCard.left - 4,
+        SnapListHeight(g_hMList, g_rcMenuCard.bottom - g_rcMenuCard.top - CARD_HEAD_H - 8), TRUE);
+    FitLastColumn(g_hMList, 5, 80 + 260 + 100 + 60 + 70);
 
     total = 3 * 8;
     for (i = 0; i < 4; i++) total += bw[i];
     x = w - UI_PAD - total;
     for (i = 0; i < 4; i++) {
-        HWND b = GetDlgItem(hwnd, ID_M_REFRESH + i);
-        if (b) MoveWindow(b, x, g_rcMBar.top + 13, bw[i], 32, TRUE);
+        MoveWindow(g_hMBtns[i], x, h - ACTIONBAR_H + 17, bw[i], 32, TRUE);
         x += bw[i] + 8;
     }
-
-    MoveWindow(g_hMInfo, UI_PAD, g_rcMBar.top + 20,
+    MoveWindow(g_hMInfo, UI_PAD, h - ACTIONBAR_H + 23,
                w - UI_PAD * 2 - total - 12, 20, TRUE);
 }
-
-static void PaintMenu(HWND hwnd, HDC hdc)
+static void PaintMenuPage(HDC hdc)
 {
-    RECT client, r;
     WCHAR buf[192];
-    int w, n = g_hMList ? ListView_GetItemCount(g_hMList) : 0;
+    int n = g_hMList ? ListView_GetItemCount(g_hMList) : 0;
 
-    GetClientRect(hwnd, &client);
-    w = client.right;
-    FillRect(hdc, &client, UiBrush(C_BG));
-
-    /* ---------- 顶部标题条 ---------- */
-    SetRect(&r, 0, 0, w, SUBTOP_H);
-    UiTopBar(hdc, &r);
-
-    SetRect(&r, UI_PAD, 11, UI_PAD + 32, 43);
-    UiRoundRect(hdc, &r, 8, RGB(0x2E, 0x7C, 0xF0), 0);
-    UiText(hdc, r.left, r.top, 32, 32, L"M", C_TEXT_ON, g_hFontBold,
-           DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-
-    UiText(hdc, UI_PAD + 44, 8, 460, 21, L"右键菜单管理", C_TEXT_ON, g_hFontBold,
-           DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-    UiText(hdc, UI_PAD + 45, 29, 620, 17,
-           L"勾选 = 禁用（可逆） · 删除 = 备份注册表后移除",
-           RGB(0xB4, 0xD0, 0xF6), g_hFontSmall,
-           DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-
-    /* ---------- 列表卡 ---------- */
-    swprintf_s(buf, _countof(buf), L"共 %d 项 · 第三方排在前面", n);
-    UiCard(hdc, &g_rcMList, L"菜单项", buf);
-
-    /* ---------- 底部操作栏 ---------- */
-    SetRect(&r, 0, g_rcMBar.top, w, g_rcMBar.top + 1);
-    FillRect(hdc, &r, UiBrush(C_BORDER));
-}
-
-static LRESULT CALLBACK MenuWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
-{
-    switch (msg) {
-    case WM_CREATE:
-        g_hMwnd = hwnd;
-        /* 与主窗口一致的轻微透明 */
-        if (!g_noGlass) {
-            SetWindowLongPtrW(hwnd, GWL_EXSTYLE,
-                              GetWindowLongPtrW(hwnd, GWL_EXSTYLE) | WS_EX_LAYERED);
-            SetLayeredWindowAttributes(hwnd, 0, 244, LWA_ALPHA);
-        }
-        CreateMenuControls(hwnd);
-        LayoutMenuControls(hwnd);
-        ScanAllMenus();
-        RefreshMenuList();
-        return 0;
-
-    case WM_ERASEBKGND:
-        return 1;
-
-    case WM_PAINT: {
-        PAINTSTRUCT ps;
-        HDC hdc = BeginPaint(hwnd, &ps);
-        PaintMenu(hwnd, hdc);
-        EndPaint(hwnd, &ps);
-        return 0;
-    }
-
-    case WM_CTLCOLORSTATIC: {
-        HDC hdc = (HDC)wp;
-        SetBkColor(hdc, C_BG);
-        SetTextColor(hdc, ((HWND)lp == g_hWarnStatic) ? C_DANGER : C_TEXT_SUB);
-        return (LRESULT)UiBrush(C_BG);
-    }
-
-    case WM_SIZE:
-        LayoutMenuControls(hwnd);
-        InvalidateRect(hwnd, NULL, FALSE);
-        return 0;
-
-    case WM_GETMINMAXINFO: {
-        MINMAXINFO *mm = (MINMAXINFO *)lp;
-        mm->ptMinTrackSize.x = 780;
-        mm->ptMinTrackSize.y = 440;
-        return 0;
-    }
-
-    case WM_NOTIFY: {
-        NMHDR *nh = (NMHDR *)lp;
-        if (nh->idFrom == ID_M_LIST && nh->code == NM_CUSTOMDRAW)
-            return HandleListCustomDraw(g_hMList, (LPNMLVCUSTOMDRAW)lp);
-        if (nh->idFrom == ID_M_LIST && nh->code == LVN_ITEMCHANGED) {
-            NMLISTVIEW *nl = (NMLISTVIEW *)lp;
-            if (!g_mFilling && (nl->uChanged & LVIF_STATE)) {
-                UINT was = (nl->uOldState & LVIS_STATEIMAGEMASK) >> 12;
-                UINT now = (nl->uNewState & LVIS_STATEIMAGEMASK) >> 12;
-                if (was && now && was != now)
-                    OnMenuToggle(nl->iItem);
-            }
-        }
-        return 0;
-    }
-
-    case WM_COMMAND:
-        switch (LOWORD(wp)) {
-        case ID_M_REFRESH:
-            ScanAllMenus();
-            RefreshMenuList();
-            return 0;
-        case ID_M_TOGGLE:
-            OnMenuToggle(ListView_GetNextItem(g_hMList, -1, LVNI_SELECTED));
-            return 0;
-        case ID_M_DELETE:
-            OnMenuDelete();
-            return 0;
-        case ID_M_BACKUP: {
-            WCHAR dir[MAX_PL];
-            swprintf_s(dir, _countof(dir), L"%s\\backup\\menu", g_selfDir);
-            CreateDirectoryW(dir, NULL);
-            ShellExecuteW(NULL, L"open", dir, NULL, NULL, SW_SHOWNORMAL);
-            return 0;
-        }
-        }
-        return 0;
-
-    case WM_CLOSE:
-        DestroyWindow(hwnd);
-        return 0;
-
-    case WM_DESTROY:
-        g_hMwnd = NULL;
-        return 0;
-    }
-    return DefWindowProcW(hwnd, msg, wp, lp);
-}
-
-static void OpenMenuWindow(HWND owner)
-{
-    if (g_hMwnd && IsWindow(g_hMwnd)) {
-        ShowWindow(g_hMwnd, SW_RESTORE);
-        SetForegroundWindow(g_hMwnd);
-        return;
-    }
-
-    g_hMwnd = CreateWindowExW(0, L"SysCleanMenuWnd", L"SysClean - 右键菜单管理",
-        WS_OVERLAPPEDWINDOW,
-        CW_USEDEFAULT, CW_USEDEFAULT, 1180, 720,
-        owner, NULL, (HINSTANCE)GetWindowLongPtrW(owner, GWLP_HINSTANCE), NULL);
-    if (!g_hMwnd) return;
-    ShowWindow(g_hMwnd, SW_SHOWNORMAL);
-    UpdateWindow(g_hMwnd);
-    ApplyTitleBarColor(g_hMwnd);
+    swprintf_s(buf, _countof(buf), L"共 %d 项 · 第三方排在前面 · 勾选=禁用", n);
+    UiCard(hdc, &g_rcMenuCard, L"右键菜单项", buf);
 }
 
 /* ============================================================
@@ -3567,7 +3449,7 @@ static void OnCopyThread(void)
     if (dst) {
         memcpy(dst, buf, len);
         GlobalUnlock(hg);
-        if (OpenClipboard(g_hTwnd)) {
+        if (OpenClipboard(g_hMain)) {
             EmptyClipboard();
             SetClipboardData(CF_UNICODETEXT, hg);
             CloseClipboard();
@@ -3626,11 +3508,11 @@ static void TRefreshAll(void)
         LoadThreadsFor(g_selPid);
         RefreshThreadList();
     }
+    if (g_hMain) LayoutControls(g_hMain);
 }
 
-static RECT g_rcTProcCard, g_rcTThrCard, g_rcTBar;
-
-static void CreateThreadControls(HWND hwnd)
+/* ---------- 第 2 页: 进程管理 ---------- */
+static void CreateProcPage(HWND hwnd)
 {
     static const WCHAR *btn[] = {
         L"刷新", L"定位线程模块", L"定位进程文件", L"结束线程", L"复制信息"
@@ -3642,11 +3524,11 @@ static void CreateThreadControls(HWND hwnd)
     int i;
 
     g_hTProc = CreateWindowExW(0, WC_LISTVIEWW, L"",
-        WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS,
+        WS_CHILD | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS,
         0, 0, 100, 100, hwnd, (HMENU)ID_T_PROC, NULL, NULL);
 
     g_hTThread = CreateWindowExW(0, WC_LISTVIEWW, L"",
-        WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS,
+        WS_CHILD | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS,
         0, 0, 100, 100, hwnd, (HMENU)ID_T_THREAD, NULL, NULL);
 
     ListView_SetExtendedListViewStyle(g_hTProc,
@@ -3691,10 +3573,10 @@ static void CreateThreadControls(HWND hwnd)
     }
 
     for (i = 0; i < 5; i++)
-        UiButton(hwnd, btnId[i], btn[i], btnKind[i], 0, 0, 10, 10);
+        g_hPBtns[i] = UiButton(hwnd, btnId[i], btn[i], btnKind[i], 0, 0, 10, 10);
 
     g_hTInfo = CreateWindowExW(0, L"STATIC", L"就绪",
-        WS_CHILD | WS_VISIBLE | SS_LEFT | SS_ENDELLIPSIS,
+        WS_CHILD | SS_LEFT | SS_ENDELLIPSIS,
         0, 0, 100, 20, hwnd, (HMENU)ID_T_INFO, NULL, NULL);
 
     SendMessageW(g_hTProc, WM_SETFONT, (WPARAM)g_hFont, TRUE);
@@ -3702,20 +3584,15 @@ static void CreateThreadControls(HWND hwnd)
     SendMessageW(g_hTInfo, WM_SETFONT, (WPARAM)g_hFontSmall, TRUE);
 }
 
-static void LayoutThreadControls(HWND hwnd)
+static void LayoutProcPage(int w, int h)
 {
     static const int bw[] = { 72, 116, 116, 96, 96 };
-    RECT rc;
-    int w, h, i, total, x, avail, procH, thrH;
+    int i, total, x, top, bottom, avail, procH, thrH;
 
-    GetClientRect(hwnd, &rc);
-    w = rc.right;
-    h = rc.bottom;
+    top = TOPBAR_H + UI_PAD;
+    bottom = h - ACTIONBAR_H - UI_PAD;
 
-    SetRect(&g_rcTBar, 0, h - SUBBAR_H, w, h);
-
-    /* 两个卡片的可用高度 (扣掉顶栏、底栏、外边距和卡片间距) */
-    avail = h - SUBTOP_H - SUBBAR_H - UI_PAD * 2 - CARD_GAP;
+    avail = bottom - top - CARD_GAP;
     if (avail < 200) avail = 200;
 
     procH = avail * 44 / 100;
@@ -3723,205 +3600,45 @@ static void LayoutThreadControls(HWND hwnd)
     thrH = avail - procH;
     if (thrH < 100) { thrH = 100; procH = avail - 100; }
 
-    SetRect(&g_rcTProcCard, UI_PAD, SUBTOP_H + UI_PAD, w - UI_PAD,
-            SUBTOP_H + UI_PAD + procH);
-    SetRect(&g_rcTThrCard, UI_PAD, g_rcTProcCard.bottom + CARD_GAP, w - UI_PAD,
-            g_rcTProcCard.bottom + CARD_GAP + thrH);
+    SetRect(&g_rcProcCard, UI_PAD, top, w - UI_PAD, top + procH);
+    SetRect(&g_rcThrCard, UI_PAD, top + procH + CARD_GAP, w - UI_PAD,
+            top + procH + CARD_GAP + thrH);
 
     MoveWindow(g_hTProc,
-        g_rcTProcCard.left + 2, g_rcTProcCard.top + CARD_HEAD_H + 2,
-        g_rcTProcCard.right - g_rcTProcCard.left - 4,
-        g_rcTProcCard.bottom - g_rcTProcCard.top - CARD_HEAD_H - 4, TRUE);
+        g_rcProcCard.left + 2, g_rcProcCard.top + CARD_HEAD_H + 2,
+        g_rcProcCard.right - g_rcProcCard.left - 4,
+        SnapListHeight(g_hTProc, g_rcProcCard.bottom - g_rcProcCard.top - CARD_HEAD_H - 8), TRUE);
+    FitLastColumn(g_hTProc, 7, 70 + 180 + 50 + 55 + 55 + 85 + 85);
 
     MoveWindow(g_hTThread,
-        g_rcTThrCard.left + 2, g_rcTThrCard.top + CARD_HEAD_H + 2,
-        g_rcTThrCard.right - g_rcTThrCard.left - 4,
-        g_rcTThrCard.bottom - g_rcTThrCard.top - CARD_HEAD_H - 4, TRUE);
+        g_rcThrCard.left + 2, g_rcThrCard.top + CARD_HEAD_H + 2,
+        g_rcThrCard.right - g_rcThrCard.left - 4,
+        SnapListHeight(g_hTThread, g_rcThrCard.bottom - g_rcThrCard.top - CARD_HEAD_H - 8), TRUE);
+    FitLastColumn(g_hTThread, 6, 80 + 150 + 150 + 110 + 55 + 80);
 
     total = 4 * 8;
     for (i = 0; i < 5; i++) total += bw[i];
     x = w - UI_PAD - total;
     for (i = 0; i < 5; i++) {
-        HWND b = GetDlgItem(hwnd, ID_T_REFRESH + i);
-        if (b) MoveWindow(b, x, g_rcTBar.top + 13, bw[i], 32, TRUE);
+        MoveWindow(g_hPBtns[i], x, h - ACTIONBAR_H + 17, bw[i], 32, TRUE);
         x += bw[i] + 8;
     }
 
-    MoveWindow(g_hTInfo, UI_PAD, g_rcTBar.top + 20,
+    MoveWindow(g_hTInfo, UI_PAD, h - ACTIONBAR_H + 23,
                w - UI_PAD * 2 - total - 12, 20, TRUE);
 }
-
-static void PaintThread(HWND hwnd, HDC hdc)
+static void PaintProcPage(HDC hdc)
 {
-    RECT client, r;
     WCHAR buf[192];
-    int w, np = 0, nt = 0;
+    int np = g_hTProc ? ListView_GetItemCount(g_hTProc) : 0;
+    int nt = g_hTThread ? ListView_GetItemCount(g_hTThread) : 0;
 
-    GetClientRect(hwnd, &client);
-    w = client.right;
-    FillRect(hdc, &client, UiBrush(C_BG));
-
-    if (g_hTProc)   np = ListView_GetItemCount(g_hTProc);
-    if (g_hTThread) nt = ListView_GetItemCount(g_hTThread);
-
-    /* ---------- 顶部标题条 ---------- */
-    SetRect(&r, 0, 0, w, SUBTOP_H);
-    UiTopBar(hdc, &r);
-
-    SetRect(&r, UI_PAD, 11, UI_PAD + 32, 43);
-    UiRoundRect(hdc, &r, 8, RGB(0x2E, 0x7C, 0xF0), 0);
-    UiText(hdc, r.left, r.top, 32, 32, L"T", C_TEXT_ON, g_hFontBold,
-           DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-
-    UiText(hdc, UI_PAD + 44, 8, 460, 21, L"线程定位", C_TEXT_ON, g_hFontBold,
-           DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-    UiText(hdc, UI_PAD + 45, 29, 620, 17,
-           L"选中进程看它的线程，起始地址反查所属模块与磁盘路径",
-           RGB(0xB4, 0xD0, 0xF6), g_hFontSmall,
-           DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-
-    /* ---------- 两个卡片 ---------- */
     swprintf_s(buf, _countof(buf), L"共 %d 个进程 · 单击选中", np);
-    UiCard(hdc, &g_rcTProcCard, L"进程", buf);
+    UiCard(hdc, &g_rcProcCard, L"进程", buf);
 
     swprintf_s(buf, _countof(buf), L"共 %d 个线程 · 双击可打开模块位置", nt);
-    UiCard(hdc, &g_rcTThrCard, L"线程", buf);
-
-    /* ---------- 底部操作栏 ---------- */
-    SetRect(&r, 0, g_rcTBar.top, w, g_rcTBar.top + 1);
-    FillRect(hdc, &r, UiBrush(C_BORDER));
+    UiCard(hdc, &g_rcThrCard, L"线程", buf);
 }
-
-static LRESULT CALLBACK ThreadWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
-{
-    switch (msg) {
-    case WM_CREATE:
-        g_hTwnd = hwnd;
-        /* 与主窗口一致的轻微透明 */
-        if (!g_noGlass) {
-            SetWindowLongPtrW(hwnd, GWL_EXSTYLE,
-                              GetWindowLongPtrW(hwnd, GWL_EXSTYLE) | WS_EX_LAYERED);
-            SetLayeredWindowAttributes(hwnd, 0, 244, LWA_ALPHA);
-        }
-        CreateThreadControls(hwnd);
-        LayoutThreadControls(hwnd);
-        TRefreshAll();
-        return 0;
-
-    case WM_ERASEBKGND:
-        return 1;
-
-    case WM_PAINT: {
-        PAINTSTRUCT ps;
-        HDC hdc = BeginPaint(hwnd, &ps);
-        PaintThread(hwnd, hdc);
-        EndPaint(hwnd, &ps);
-        return 0;
-    }
-
-    case WM_CTLCOLORSTATIC: {
-        HDC hdc = (HDC)wp;
-        SetBkColor(hdc, C_BG);
-        SetTextColor(hdc, ((HWND)lp == g_hWarnStatic) ? C_DANGER : C_TEXT_SUB);
-        return (LRESULT)UiBrush(C_BG);
-    }
-
-    case WM_SIZE:
-        LayoutThreadControls(hwnd);
-        InvalidateRect(hwnd, NULL, FALSE);
-        return 0;
-
-    case WM_GETMINMAXINFO: {
-        MINMAXINFO *mm = (MINMAXINFO *)lp;
-        mm->ptMinTrackSize.x = 820;
-        mm->ptMinTrackSize.y = 520;
-        return 0;
-    }
-
-    case WM_NOTIFY: {
-        NMHDR *nh = (NMHDR *)lp;
-        if (nh->code == NM_CUSTOMDRAW) {
-            if (nh->idFrom == ID_T_PROC)
-                return HandleListCustomDraw(g_hTProc, (LPNMLVCUSTOMDRAW)lp);
-            if (nh->idFrom == ID_T_THREAD)
-                return HandleListCustomDraw(g_hTThread, (LPNMLVCUSTOMDRAW)lp);
-        }
-        if (nh->idFrom == ID_T_PROC && nh->code == LVN_ITEMCHANGED) {
-            NMLISTVIEW *nl = (NMLISTVIEW *)lp;
-            if ((nl->uNewState & LVIS_SELECTED) && !(nl->uOldState & LVIS_SELECTED))
-                OnProcSelChange(nl->iItem);
-        } else if (nh->idFrom == ID_T_PROC && nh->code == NM_DBLCLK) {
-            OnRevealProc();
-        } else if (nh->idFrom == ID_T_THREAD && nh->code == NM_DBLCLK) {
-            OnRevealThread();
-        }
-        return 0;
-    }
-
-    case WM_COMMAND:
-        switch (LOWORD(wp)) {
-        case ID_T_REFRESH: TRefreshAll();    return 0;
-        case ID_T_REVEAL:  OnRevealThread(); return 0;
-        case ID_T_REVEALP: OnRevealProc();   return 0;
-        case ID_T_KILLTHR: OnKillThread();   return 0;
-        case ID_T_COPY:    OnCopyThread();   return 0;
-        }
-        return 0;
-
-    case WM_CLOSE:
-        DestroyWindow(hwnd);
-        return 0;
-
-    case WM_DESTROY:
-        g_hTwnd = NULL;
-        g_twndOpen = FALSE;
-        return 0;
-    }
-    return DefWindowProcW(hwnd, msg, wp, lp);
-}
-
-static void OpenThreadWindow(HWND owner)
-{
-    if (g_hTwnd && IsWindow(g_hTwnd)) {
-        ShowWindow(g_hTwnd, SW_RESTORE);
-        SetForegroundWindow(g_hTwnd);
-        return;
-    }
-
-    g_twndOpen = TRUE;
-    g_hTwnd = CreateWindowExW(0, L"SysCleanThreadWnd", L"SysClean - 进程与线程",
-        WS_OVERLAPPEDWINDOW,
-        CW_USEDEFAULT, CW_USEDEFAULT, 1200, 760,
-        owner, NULL, (HINSTANCE)GetWindowLongPtrW(owner, GWLP_HINSTANCE), NULL);
-    if (!g_hTwnd) { g_twndOpen = FALSE; return; }
-    ShowWindow(g_hTwnd, SW_SHOWNORMAL);
-    UpdateWindow(g_hTwnd);
-    ApplyTitleBarColor(g_hTwnd);
-}
-
-/* ============================================================
- * 界面
- * ============================================================ */
-
-/* ============================================================
- * 主窗口 —— 一个模块, 内部划分区块
- *
- *   ┌──────────────────────────────────────────┐
- *   │  顶栏: 标题 + 权限徽章                    │
- *   ├──────────────────────────────────────────┤
- *   │  [概览卡]  已装程序 / 运行进程 / 已勾选 / 守卫 │
- *   ├──────────────────────────────────────────┤
- *   │  [程序列表卡]                             │
- *   ├──────────────────────────────────────────┤
- *   │  [运行日志卡]                             │
- *   ├──────────────────────────────────────────┤
- *   │  状态文字            [操作按钮组]          │
- *   └──────────────────────────────────────────┘
- *
- * 所有操作按钮沉在底部; 需要确认时整组按钮换成「确认执行 / 取消」,
- * 不弹任何对话框。
- * ============================================================ */
-
 static void CreateUiFonts(void)
 {
     const WCHAR *face = L"Microsoft YaHei";
@@ -3943,19 +3660,20 @@ static void CreateUiFonts(void)
         DEFAULT_PITCH | FF_DONTCARE, face);
 }
 
-static void CreateControls(HWND hwnd)
+/* ---------- 第 1 页: 自身功能 (程序列表 / 卸载 / 日志) ---------- */
+static void CreateSelfPage(HWND hwnd)
 {
     static const WCHAR *btnText[] = {
-        L"重新扫描", L"关闭进程", L"卸载选中",
-        L"备份目录", L"进程与线程", L"右键菜单"
+        L"重新扫描", L"备份目录", L"关闭进程", L"卸载选中"
     };
-    static const int btnKind[] = { 0, 2, 1, 0, 0, 0 };
+    static const int btnId[] = {
+        ID_BTN_SCAN, ID_BTN_BACKUP, ID_BTN_KILL, ID_BTN_UNINST
+    };
+    static const int btnKind[] = { 0, 0, 2, 1 };
     int i;
 
-    CreateUiFonts();
-
     g_hList = CreateWindowExW(0, WC_LISTVIEWW, L"",
-        WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS,
+        WS_CHILD | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS,
         0, 0, 100, 100, hwnd, (HMENU)ID_LIST, NULL, NULL);
 
     ListView_SetExtendedListViewStyle(g_hList,
@@ -3980,33 +3698,23 @@ static void CreateControls(HWND hwnd)
     }
 
     g_hLog = CreateWindowExW(0, L"EDIT", L"",
-        WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL,
+        WS_CHILD | WS_VSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL,
         0, 0, 100, 100, hwnd, (HMENU)ID_LOG, NULL, NULL);
 
-    for (i = 0; i < 6; i++)
-        g_hBtns[i] = UiButton(hwnd, ID_BTN_SCAN + i, btnText[i], btnKind[i], 0, 0, 10, 10);
+    for (i = 0; i < N_SELF_BTN; i++)
+        g_hBtns[i] = UiButton(hwnd, btnId[i], btnText[i], btnKind[i], 0, 0, 10, 10);
 
     g_hBtnConfirm = UiButton(hwnd, ID_BTN_CONFIRM, L"确认执行", 2, 0, 0, 10, 10);
     g_hBtnCancel = UiButton(hwnd, ID_BTN_CANCEL, L"取消", 0, 0, 0, 10, 10);
-    ShowWindow(g_hBtnConfirm, SW_HIDE);
-    ShowWindow(g_hBtnCancel, SW_HIDE);
 
     SendMessageW(g_hList, WM_SETFONT, (WPARAM)g_hFont, TRUE);
     SendMessageW(g_hLog, WM_SETFONT, (WPARAM)g_hFont, TRUE);
 }
 
-static void LayoutControls(HWND hwnd)
+static void LayoutSelfPage(int w, int h)
 {
-    static const int bw[] = { 96, 100, 104, 96, 110, 96 };
-    RECT rc;
-    int w, h, listTop, logTop, i, total, x;
-
-    GetClientRect(hwnd, &rc);
-    w = rc.right;
-    h = rc.bottom;
-
-    SetRect(&g_rcTopBar, 0, 0, w, TOPBAR_H);
-    SetRect(&g_rcActionBar, 0, h - ACTIONBAR_H, w, h);
+    static const int bw[] = { 96, 96, 100, 104 };
+    int i, total, x, listTop, logTop;
 
     SetRect(&g_rcStatCard, UI_PAD, TOPBAR_H + UI_PAD,
             w - UI_PAD, TOPBAR_H + UI_PAD + STATCARD_H);
@@ -4022,24 +3730,25 @@ static void LayoutControls(HWND hwnd)
     MoveWindow(g_hList,
         g_rcListCard.left + 2, g_rcListCard.top + CARD_HEAD_H + 2,
         g_rcListCard.right - g_rcListCard.left - 4,
-        g_rcListCard.bottom - g_rcListCard.top - CARD_HEAD_H - 4, TRUE);
+        SnapListHeight(g_hList, g_rcListCard.bottom - g_rcListCard.top - CARD_HEAD_H - 8), TRUE);
+    FitLastColumn(g_hList, 6, 236 + 66 + 132 + 76 + 74 + 66);
 
     MoveWindow(g_hLog,
         g_rcLogCard.left + 2, g_rcLogCard.top + CARD_HEAD_H + 2,
         g_rcLogCard.right - g_rcLogCard.left - 4,
         g_rcLogCard.bottom - g_rcLogCard.top - CARD_HEAD_H - 4, TRUE);
 
-    /* 底部按钮组: 整体右对齐 */
-    total = 5 * 8;
-    for (i = 0; i < 6; i++) total += bw[i];
+    total = (N_SELF_BTN - 1) * 8;
+    for (i = 0; i < N_SELF_BTN; i++) total += bw[i];
     x = w - UI_PAD - total;
-    for (i = 0; i < 6; i++) {
-        MoveWindow(g_hBtns[i], x, g_rcActionBar.top + 17, bw[i], 34, TRUE);
+    for (i = 0; i < N_SELF_BTN; i++) {
+        MoveWindow(g_hBtns[i], x, h - ACTIONBAR_H + 17, bw[i], 34, TRUE);
         x += bw[i] + 8;
     }
 
-    MoveWindow(g_hBtnCancel, w - UI_PAD - 92, g_rcActionBar.top + 17, 92, 34, TRUE);
-    MoveWindow(g_hBtnConfirm, w - UI_PAD - 92 - 8 - 116, g_rcActionBar.top + 17, 116, 34, TRUE);
+    MoveWindow(g_hBtnCancel, w - UI_PAD - 92, h - ACTIONBAR_H + 17, 92, 34, TRUE);
+    MoveWindow(g_hBtnConfirm, w - UI_PAD - 92 - 8 - 116,
+               h - ACTIONBAR_H + 17, 116, 34, TRUE);
 }
 
 /* 概览卡的四个指标 */
@@ -4076,10 +3785,192 @@ static void PaintStatCard(HDC hdc)
     }
 }
 
+static void PaintSelfPage(HDC hdc)
+{
+    WCHAR buf[160];
+
+    PaintStatCard(hdc);
+
+    swprintf_s(buf, _countof(buf), L"共 %d 项 · 勾选后点「卸载选中」", g_statProgs);
+    UiCard(hdc, &g_rcListCard, L"程序列表", buf);
+
+    UiCard(hdc, &g_rcLogCard, L"运行日志", L"删除清单与执行过程都记在这里");
+}
+
+/* ============================================================
+ * 顶栏: Logo + 三个标签页 + 权限徽章
+ * ============================================================ */
+
+static void PaintTopBar(HDC hdc, int w)
+{
+    static const WCHAR *tabText[3] = { L"自身功能", L"进程管理", L"右键菜单" };
+    RECT r;
+    int i;
+
+    SetRect(&r, 0, 0, w, TOPBAR_H);
+    UiTopBar(hdc, &r);
+
+    /* logo */
+    SetRect(&r, UI_PAD, 21, UI_PAD + 34, 55);
+    UiRoundRect(hdc, &r, 9, C_BLUE, 0);
+    UiText(hdc, r.left, r.top, 34, 34, L"S", C_TEXT_ON, g_hFontTitle,
+           DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+    UiText(hdc, UI_PAD + 46, 15, 240, 26, L"SysClean", C_TEXT_ON, g_hFontTitle,
+           DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    UiText(hdc, UI_PAD + 47, 42, 220, 16, L"系统清理与卸载工具",
+           RGB(0x9A, 0xBE, 0xEA), g_hFontSmall,
+           DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+    /* 三个标签 */
+    for (i = 0; i < 3; i++) {
+        BOOL on = (i == g_page);
+        const RECT *t = &g_rcTabs[i];
+
+        if (on)
+            UiRoundRect(hdc, t, 8, C_BLUE, 0);
+        else if (i == g_tabHot)
+            UiRoundRect(hdc, t, 8, RGB(0x1B, 0x3F, 0x6C), C_BLUE_LINE);
+        else
+            UiRoundRect(hdc, t, 8, C_BLUE_DEEP2, 0);
+
+        UiText(hdc, t->left, t->top, t->right - t->left, t->bottom - t->top,
+               tabText[i], on ? C_TEXT_ON : C_HEAD_TXT,
+               on ? g_hFontBold : g_hFont,
+               DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    }
+
+    /* 权限徽章 */
+    {
+        const WCHAR *t = g_isAdmin ? L"管理员权限" : L"受限权限";
+        int bw = g_isAdmin ? 88 : 76;
+        SetRect(&r, w - UI_PAD - bw, 21, w - UI_PAD, 55);
+        UiRoundRect(hdc, &r, 10,
+                    g_isAdmin ? RGB(0x14, 0x5C, 0x3C) : RGB(0x6B, 0x42, 0x10), 0);
+        UiText(hdc, r.left, r.top, bw, 34, t, C_TEXT_ON, g_hFontSmall,
+               DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    }
+}
+
+static int TabAt(int x, int y)
+{
+    POINT p;
+    int i;
+
+    p.x = x;
+    p.y = y;
+    for (i = 0; i < 3; i++)
+        if (PtInRect(&g_rcTabs[i], p)) return i;
+    return -1;
+}
+
+/* ============================================================
+ * 页面切换
+ * ============================================================ */
+
+static void ShowPage(int page, BOOL show)
+{
+    int i, cmd = show ? SW_SHOW : SW_HIDE;
+
+    switch (page) {
+    case PAGE_PROC:
+        ShowWindow(g_hTProc, cmd);
+        ShowWindow(g_hTThread, cmd);
+        ShowWindow(g_hTInfo, cmd);
+        for (i = 0; i < 5; i++) ShowWindow(g_hPBtns[i], cmd);
+        break;
+
+    case PAGE_MENU:
+        ShowWindow(g_hMList, cmd);
+        ShowWindow(g_hMInfo, cmd);
+        for (i = 0; i < 4; i++) ShowWindow(g_hMBtns[i], cmd);
+        break;
+
+    default:
+        ShowWindow(g_hList, cmd);
+        ShowWindow(g_hLog, cmd);
+        for (i = 0; i < N_SELF_BTN; i++) ShowWindow(g_hBtns[i], cmd);
+        /* 有待确认的操作时, 确认按钮跟着页面一起显隐 */
+        if (show && g_pendingAction) {
+            ShowWindow(g_hBtnConfirm, SW_SHOW);
+            ShowWindow(g_hBtnCancel, SW_SHOW);
+        } else {
+            ShowWindow(g_hBtnConfirm, SW_HIDE);
+            ShowWindow(g_hBtnCancel, SW_HIDE);
+        }
+        break;
+    }
+}
+
+static void SwitchPage(int page)
+{
+    if (page == g_page) return;
+
+    ShowPage(g_page, FALSE);
+    g_page = page;
+    ShowPage(g_page, TRUE);
+
+    LayoutControls(g_hMain);
+
+    /* 耗时扫描只在第一次进入该页时做, 切回来不重复扫 */
+    if (page == PAGE_PROC && !g_procLoaded) {
+        g_procLoaded = TRUE;
+        TRefreshAll();
+    }
+    if (page == PAGE_MENU && !g_menuLoaded) {
+        g_menuLoaded = TRUE;
+        ScanAllMenus();
+        RefreshMenuList();
+    }
+
+    InvalidateRect(g_hMain, NULL, FALSE);
+    UpdateWindow(g_hMain);
+}
+
+/* ============================================================
+ * 统一布局: 顶栏 + 三个页面 + 底部操作栏
+ * ============================================================ */
+
+static void LayoutControls(HWND hwnd)
+{
+    RECT rc;
+    int w, h, i, tx;
+
+    GetClientRect(hwnd, &rc);
+    w = rc.right;
+    h = rc.bottom;
+
+    SetRect(&g_rcTopBar, 0, 0, w, TOPBAR_H);
+    SetRect(&g_rcActionBar, 0, h - ACTIONBAR_H, w, h);
+
+    /* 三个标签: 紧跟在 Logo 后面, 固定宽度 */
+    tx = 250;
+    for (i = 0; i < 3; i++) {
+        SetRect(&g_rcTabs[i], tx, (TOPBAR_H - TAB_H) / 2,
+                tx + 110, (TOPBAR_H - TAB_H) / 2 + TAB_H);
+        tx += 110 + 8;
+    }
+
+    LayoutSelfPage(w, h);
+    LayoutProcPage(w, h);
+    LayoutMenuPage(w, h);
+}
+
+static void CreateControls(HWND hwnd)
+{
+    CreateUiFonts();
+    CreateSelfPage(hwnd);
+    CreateProcPage(hwnd);
+    CreateMenuPage(hwnd);
+
+    ShowPage(PAGE_PROC, FALSE);
+    ShowPage(PAGE_MENU, FALSE);
+    ShowPage(PAGE_SELF, TRUE);
+}
+
 static void PaintMain(HWND hwnd, HDC hdc)
 {
     RECT client, r;
-    WCHAR buf[160];
     int w;
 
     GetClientRect(hwnd, &client);
@@ -4087,64 +3978,44 @@ static void PaintMain(HWND hwnd, HDC hdc)
 
     FillRect(hdc, &client, UiBrush(C_BG));
 
-    /* ---------- 顶栏 ---------- */
-    UiTopBar(hdc, &g_rcTopBar);
+    PaintTopBar(hdc, w);
 
-    SetRect(&r, UI_PAD, 16, UI_PAD + 32, 48);
-    UiRoundRect(hdc, &r, 8, C_BLUE, 0);
-    UiText(hdc, r.left, r.top, 32, 32, L"S", C_TEXT_ON, g_hFontTitle,
-           DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-
-    UiText(hdc, UI_PAD + 44, 13, 420, 24, L"SysClean", C_TEXT_ON, g_hFontTitle,
-           DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-    UiText(hdc, UI_PAD + 45, 35, 520, 18,
-           L"进程清理 · 强制卸载 · 线程定位 · 右键菜单",
-           RGB(0xB4, 0xD0, 0xF6), g_hFontSmall,
-           DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-
-    {
-        const WCHAR *t = g_isAdmin ? L"管理员权限" : L"受限权限";
-        int bw = g_isAdmin ? 86 : 74;
-        SetRect(&r, w - UI_PAD - bw, 20, w - UI_PAD, 44);
-        UiRoundRect(hdc, &r, 12,
-                    g_isAdmin ? RGB(0x18, 0x6B, 0x3C) : RGB(0x7C, 0x4A, 0x0C), 0);
-        UiText(hdc, r.left, r.top, bw, 24, t, C_TEXT_ON, g_hFontSmall,
-               DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    switch (g_page) {
+    case PAGE_PROC: PaintProcPage(hdc); break;
+    case PAGE_MENU: PaintMenuPage(hdc); break;
+    default:        PaintSelfPage(hdc); break;
     }
 
-    /* ---------- 概览 ---------- */
-    PaintStatCard(hdc);
-
-    /* ---------- 程序列表 ---------- */
-    swprintf_s(buf, _countof(buf), L"共 %d 项 · 勾选后点「卸载选中」", g_statProgs);
-    UiCard(hdc, &g_rcListCard, L"程序列表", buf);
-
-    /* ---------- 运行日志 ---------- */
-    UiCard(hdc, &g_rcLogCard, L"运行日志", L"删除清单与执行过程都记在这里");
-
-    /* ---------- 底部操作栏 ---------- */
+    /* 底部操作栏分隔线 */
     SetRect(&r, 0, g_rcActionBar.top, w, g_rcActionBar.top + 1);
     FillRect(hdc, &r, UiBrush(C_BORDER));
 
-    if (g_pendingAction) {
-        UiText(hdc, UI_PAD, g_rcActionBar.top + 15, 640, 20,
-               g_pendingAction == 1
-                   ? L"确认强制卸载？删除不可逆，清单见上方日志"
-                   : L"确认终止所有非系统进程？未保存内容会丢失",
-               C_DANGER, g_hFontBold, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-        UiText(hdc, UI_PAD, g_rcActionBar.top + 36, 640, 18,
-               L"点右侧「确认执行」开始，或「取消」返回",
-               C_TEXT_SUB, g_hFontSmall, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-    } else {
-        UiText(hdc, UI_PAD, g_rcActionBar.top + 15, 600, 20, g_statusText,
-               C_TEXT, g_hFont, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-        UiText(hdc, UI_PAD, g_rcActionBar.top + 36, 600, 18, g_statHint,
-               C_TEXT_MUTED, g_hFontSmall, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    /* 只有自身功能页在操作栏里画状态文字, 另两页用的是提示条 STATIC */
+    if (g_page == PAGE_SELF) {
+        if (g_pendingAction) {
+            UiText(hdc, UI_PAD, g_rcActionBar.top + 15, 640, 20,
+                   g_pendingAction == 1
+                       ? L"确认强制卸载？删除不可逆，清单见上方日志"
+                       : L"确认终止所有非系统进程？未保存内容会丢失",
+                   C_DANGER, g_hFontBold, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+            UiText(hdc, UI_PAD, g_rcActionBar.top + 36, 640, 18,
+                   L"点右侧「确认执行」开始，或「取消」返回",
+                   C_TEXT_SUB, g_hFontSmall, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        } else {
+            UiText(hdc, UI_PAD, g_rcActionBar.top + 15, 600, 20, g_statusText,
+                   C_TEXT, g_hFont, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+            UiText(hdc, UI_PAD, g_rcActionBar.top + 36, 600, 18, g_statHint,
+                   C_TEXT_MUTED, g_hFontSmall, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        }
     }
 }
+/* ============================================================
+ * 以下为通用辅助 (列表自绘 / 确认条 / 标题栏染色)
+ * ============================================================ */
 
 /* 把系统标题栏也染成深蓝, 让标题栏和客户区看起来是一个整体。
-   Win11 支持 DWMWA_CAPTION_COLOR; 更老的系统调用失败就保持默认外观。 */
+   Win11 支持 DWMWA_CAPTION_COLOR; 更老的系统调用失败就保持默认外观。
+   注意: 必须在 ShowWindow 之后调用, 之前调 DWM 会忽略。 */
 static void ApplyTitleBarColor(HWND hwnd)
 {
     typedef HRESULT (WINAPI *PFN_DwmSet)(HWND, DWORD, LPCVOID, DWORD);
@@ -4190,7 +4061,7 @@ static void SetPendingAction(int act, int count)
     g_pendingAction = act;
     g_pendingCount = count;
 
-    for (i = 0; i < 6; i++) ShowWindow(g_hBtns[i], SW_HIDE);
+    for (i = 0; i < N_SELF_BTN; i++) ShowWindow(g_hBtns[i], SW_HIDE);
     ShowWindow(g_hBtnConfirm, SW_SHOW);
     ShowWindow(g_hBtnCancel, SW_SHOW);
     InvalidateRect(g_hMain, NULL, FALSE);
@@ -4204,7 +4075,7 @@ static void ClearPendingAction(void)
     g_pendingAction = 0;
     ShowWindow(g_hBtnConfirm, SW_HIDE);
     ShowWindow(g_hBtnCancel, SW_HIDE);
-    for (i = 0; i < 6; i++) ShowWindow(g_hBtns[i], SW_SHOW);
+    for (i = 0; i < N_SELF_BTN; i++) ShowWindow(g_hBtns[i], SW_SHOW);
     InvalidateRect(g_hMain, NULL, FALSE);
     UpdateWindow(g_hMain);
 }
@@ -4214,7 +4085,7 @@ static void SetBusyUi(BOOL busy)
     int i;
 
     g_busy = busy;
-    for (i = 0; i < 6; i++)
+    for (i = 0; i < N_SELF_BTN; i++)
         if (g_hBtns[i]) EnableWindow(g_hBtns[i], !busy);
 }
 
@@ -4249,7 +4120,7 @@ static LRESULT CALLBACK HdrSubclassProc(HWND h, UINT m, WPARAM w, LPARAM l,
             SendMessageW(h, HDM_GETITEMW, i, (LPARAM)&hi);
 
             UiText(hdc, ir.left + 7, ir.top, ir.right - ir.left - 12,
-                   ir.bottom - ir.top, name, C_BLUE, g_hFontBold,
+                   ir.bottom - ir.top, name, C_HEAD_TXT, g_hFontBold,
                    DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
 
             if (i < n - 1) {
@@ -4306,7 +4177,39 @@ static LRESULT HandleListCustomDraw(HWND lv, LPNMLVCUSTOMDRAW cd)
     }
 }
 
-/* 把一个 ListView 调成蓝色主题外观 */
+/* 让最后一列吃掉剩余宽度, 避免出现横向滚动条 */
+static void FitLastColumn(HWND lv, int lastIdx, int fixedSum)
+{
+    RECT rc;
+    int w;
+
+    if (!lv) return;
+    GetClientRect(lv, &rc);
+    /* 必须再扣掉垂直滚动条的宽度: 布局时列表还是空的, 没有滚动条,
+       数据填进去之后客户区会窄 17px, 那时就冒出横向滚动条了。 */
+    w = rc.right - fixedSum - GetSystemMetrics(SM_CXVSCROLL) - 2;
+    if (w < 120) w = 120;
+    ListView_SetColumnWidth(lv, lastIdx, w);
+}
+
+/* 把列表高度对齐到行高的整数倍, 避免最后一行被切成半截 */
+static int SnapListHeight(HWND lv, int want)
+{
+    RECT ir;
+    int rh = 19;
+
+    if (lv && ListView_GetItemCount(lv) > 0) {
+        ir.left = LVIR_BOUNDS;
+        ir.top = 0;
+        if (SendMessageW(lv, LVM_GETITEMRECT, 0, (LPARAM)&ir))
+            rh = ir.bottom - ir.top;
+    }
+    if (rh < 12) rh = 12;
+    if (want > rh) want -= want % rh;
+    return want;
+}
+
+/* 把一个 ListView 调成深蓝主题外观 */
 static void StyleListView(HWND lv)
 {
     if (!lv) return;
@@ -4316,19 +4219,17 @@ static void StyleListView(HWND lv)
     HookHeader(lv);
 }
 
-
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 {
     switch (msg) {
     case WM_CREATE:
         g_hMain = hwnd;
         g_isAdmin = IsAdmin();
-        /* 轻微透明: 244/255 ≈ 96% 不透明度, 有玻璃感又不糊字。
-           WS_EX_LAYERED 会让 PrintWindow 抓不到子控件, 所以留个 /noglass 给截图用。 */
+        /* 轻微透明: 236/255 ≈ 93% 不透明度, 深蓝底透出桌面有一点玻璃感 */
         if (!g_noGlass) {
             SetWindowLongPtrW(hwnd, GWL_EXSTYLE,
                               GetWindowLongPtrW(hwnd, GWL_EXSTYLE) | WS_EX_LAYERED);
-            SetLayeredWindowAttributes(hwnd, 0, 244, LWA_ALPHA);
+            SetLayeredWindowAttributes(hwnd, 0, 236, LWA_ALPHA);
         }
         CreateControls(hwnd);
         LayoutControls(hwnd);
@@ -4354,6 +4255,38 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         return (LRESULT)UiBrush(C_CARD);
     }
 
+    /* ---- 顶栏标签: 悬停高亮 + 点击切页 ---- */
+    case WM_MOUSEMOVE: {
+        int t = TabAt((short)LOWORD(lp), (short)HIWORD(lp));
+        if (t != g_tabHot) {
+            TRACKMOUSEEVENT tm;
+            g_tabHot = t;
+            tm.cbSize = sizeof(tm);
+            tm.dwFlags = TME_LEAVE;
+            tm.hwndTrack = hwnd;
+            tm.dwHoverTime = 0;
+            TrackMouseEvent(&tm);
+            InvalidateRect(hwnd, &g_rcTopBar, FALSE);
+        }
+        return 0;
+    }
+
+    case WM_MOUSELEAVE:
+        if (g_tabHot != -1) {
+            g_tabHot = -1;
+            InvalidateRect(hwnd, &g_rcTopBar, FALSE);
+        }
+        return 0;
+
+    case WM_LBUTTONDOWN: {
+        int t = TabAt((short)LOWORD(lp), (short)HIWORD(lp));
+        if (t >= 0) {
+            SwitchPage(t);
+            return 0;
+        }
+        break;
+    }
+
     case WM_TIMER:
         if (wp == 1) {
             KillTimer(hwnd, 1);
@@ -4375,12 +4308,13 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
     case WM_GETMINMAXINFO:
         ((MINMAXINFO *)lp)->ptMinTrackSize.x = 1060;
-        ((MINMAXINFO *)lp)->ptMinTrackSize.y = 660;
+        ((MINMAXINFO *)lp)->ptMinTrackSize.y = 700;
         return 0;
 
     case WM_NOTIFY: {
         LPNMHDR nh = (LPNMHDR)lp;
 
+        /* 第 1 页: 程序列表 */
         if (nh->idFrom == ID_LIST) {
             if (nh->code == NM_CUSTOMDRAW)
                 return HandleListCustomDraw(g_hList, (LPNMLVCUSTOMDRAW)lp);
@@ -4389,16 +4323,49 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                 return 0;
             }
         }
+
+        /* 第 3 页: 右键菜单列表 */
+        if (nh->idFrom == ID_M_LIST) {
+            if (nh->code == NM_CUSTOMDRAW)
+                return HandleListCustomDraw(g_hMList, (LPNMLVCUSTOMDRAW)lp);
+            if (nh->code == LVN_ITEMCHANGED) {
+                NMLISTVIEW *nl = (NMLISTVIEW *)lp;
+                if (!g_mFilling && (nl->uChanged & LVIF_STATE)) {
+                    UINT was = (nl->uOldState & LVIS_STATEIMAGEMASK) >> 12;
+                    UINT now = (nl->uNewState & LVIS_STATEIMAGEMASK) >> 12;
+                    if (was && now && was != now)
+                        OnMenuToggle(nl->iItem);
+                }
+            }
+        }
+
+        /* 第 2 页: 进程 / 线程两个列表 */
+        if (nh->idFrom == ID_T_PROC) {
+            if (nh->code == NM_CUSTOMDRAW)
+                return HandleListCustomDraw(g_hTProc, (LPNMLVCUSTOMDRAW)lp);
+            if (nh->code == LVN_ITEMCHANGED) {
+                NMLISTVIEW *nl = (NMLISTVIEW *)lp;
+                if ((nl->uNewState & LVIS_SELECTED) && !(nl->uOldState & LVIS_SELECTED))
+                    OnProcSelChange(nl->iItem);
+            } else if (nh->code == NM_DBLCLK) {
+                OnRevealProc();
+            }
+        }
+        if (nh->idFrom == ID_T_THREAD) {
+            if (nh->code == NM_CUSTOMDRAW)
+                return HandleListCustomDraw(g_hTThread, (LPNMLVCUSTOMDRAW)lp);
+            if (nh->code == NM_DBLCLK)
+                OnRevealThread();
+        }
         return 0;
     }
 
     case WM_COMMAND:
         switch (LOWORD(wp)) {
+        /* --- 第 1 页 --- */
         case ID_BTN_SCAN:   DoScan();      return 0;
         case ID_BTN_KILL:   OnKillAll();   return 0;
         case ID_BTN_UNINST: OnUninstall(); return 0;
-        case ID_BTN_THREADS: OpenThreadWindow(hwnd); return 0;
-        case ID_BTN_MENU:   OpenMenuWindow(hwnd);   return 0;
         case ID_BTN_BACKUP: {
             WCHAR path[MAX_PATH];
             swprintf_s(path, _countof(path), L"%s\\backup", g_selfDir);
@@ -4420,6 +4387,32 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             Status(L"已取消，未做任何修改");
             Log(L"[取消] 操作已取消, 未做任何修改。");
             return 0;
+
+        /* --- 第 2 页 --- */
+        case ID_T_REFRESH: TRefreshAll();    return 0;
+        case ID_T_REVEAL:  OnRevealThread(); return 0;
+        case ID_T_REVEALP: OnRevealProc();   return 0;
+        case ID_T_KILLTHR: OnKillThread();   return 0;
+        case ID_T_COPY:    OnCopyThread();   return 0;
+
+        /* --- 第 3 页 --- */
+        case ID_M_REFRESH:
+            ScanAllMenus();
+            RefreshMenuList();
+            return 0;
+        case ID_M_TOGGLE:
+            OnMenuToggle(ListView_GetNextItem(g_hMList, -1, LVNI_SELECTED));
+            return 0;
+        case ID_M_DELETE:
+            OnMenuDelete();
+            return 0;
+        case ID_M_BACKUP: {
+            WCHAR dir[MAX_PL];
+            swprintf_s(dir, _countof(dir), L"%s\\backup\\menu", g_selfDir);
+            CreateDirectoryW(dir, NULL);
+            ShellExecuteW(NULL, L"open", dir, NULL, NULL, SW_SHOWNORMAL);
+            return 0;
+        }
         }
         return 0;
 
@@ -4749,22 +4742,6 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE hPrev, LPWSTR cmdLine, int nShow)
     wc.lpszClassName = L"SysCleanWnd";
     wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
     if (!RegisterClassExW(&wc)) return 0;
-
-    /* 进程与线程窗口的类 */
-    wc.lpfnWndProc = ThreadWndProc;
-    wc.lpszClassName = L"SysCleanThreadWnd";
-    wc.hCursor = LoadCursorW(NULL, (LPCWSTR)IDC_ARROW);
-    wc.hIcon = LoadIconW(NULL, (LPCWSTR)IDI_APPLICATION);
-    wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
-    RegisterClassExW(&wc);
-
-    /* 右键菜单管理窗口的类 */
-    wc.lpfnWndProc = MenuWndProc;
-    wc.lpszClassName = L"SysCleanMenuWnd";
-    wc.hCursor = LoadCursorW(NULL, (LPCWSTR)IDC_ARROW);
-    wc.hIcon = LoadIconW(NULL, (LPCWSTR)IDI_APPLICATION);
-    wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
-    RegisterClassExW(&wc);
 
     /* 自绘按钮类 */
     wc.lpfnWndProc = BtnProc;
