@@ -66,7 +66,7 @@ echo.
 if not exist "..\dist" mkdir "..\dist"
 
 set "CFLAGS=/nologo /MT /O2 /W3 /utf-8 /D_WIN32_WINNT=0x0601"
-set "LIBS=user32.lib advapi32.lib comctl32.lib shlwapi.lib gdi32.lib shell32.lib psapi.lib"
+set "LIBS=user32.lib advapi32.lib comctl32.lib shlwapi.lib gdi32.lib shell32.lib psapi.lib msimg32.lib"
 
 rem ---------- x64 ----------
 echo === [1/2] building x64  -^>  dist\SysClean.exe ===

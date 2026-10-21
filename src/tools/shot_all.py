@@ -1,9 +1,9 @@
-"""截取主窗口 + 右键菜单窗口, 存成 PNG。
+"""截取主窗口 / 右键菜单窗口 / 线程窗口, 存成 PNG。
 
 用途: 更新 README 里的界面截图。需要先编译出 dist\\SysClean.exe。
 会弹 UAC, 点「是」即可。截图完成后窗口自动关闭。
 
-    python src/tools/shot_all.py docs/preview.png docs/preview_menu.png
+    python src/tools/shot_all.py docs/preview.png docs/preview_menu.png docs/preview_threads.png
 """
 import ctypes, ctypes.wintypes as wt, time, zlib, struct, sys, os
 from ctypes import wintypes
@@ -78,7 +78,16 @@ def shoot(hwnd, out):
     bi.biWidth, bi.biHeight, bi.biPlanes, bi.biBitCount = w, -h, 1, 32
     buf = ctypes.create_string_buffer(w * h * 4)
     gdi32.GetDIBits(mdc, bmp, 0, h, buf, ctypes.byref(bi), 0)
-    raw = b''.join(buf[y * w * 4:(y + 1) * w * 4] for y in range(h))
+
+    # GetDIBits 给的是 BGRA, PNG 要 RGBA; 每行前面还得加一个 filter 字节 (0 = None)
+    stride = w * 4
+    raw = bytearray()
+    for y in range(h):
+        row = bytearray(buf[y * stride:(y + 1) * stride])
+        row[0::4], row[2::4] = row[2::4], row[0::4]
+        raw.append(0)
+        raw += row
+    raw = bytes(raw)
 
     def chunk(t, d):
         return (struct.pack('>I', len(d)) + t + d
@@ -97,11 +106,11 @@ def shoot(hwnd, out):
 
 def main():
     if len(sys.argv) < 3:
-        sys.exit('usage: shot_all.py <main.png> <menu.png>')
+        sys.exit('usage: shot_all.py <main.png> <menu.png> [threads.png]')
     if not os.path.exists(EXE):
         sys.exit('not built yet: %s' % EXE)
 
-    ctypes.windll.shell32.ShellExecuteW(None, 'runas', EXE, None, None, 1)
+    ctypes.windll.shell32.ShellExecuteW(None, 'runas', EXE, '/noglass', None, 1)
     time.sleep(6)
 
     mains = find_windows('SysCleanWnd')
@@ -112,16 +121,37 @@ def main():
     time.sleep(0.5)
     shoot(main_wnd, sys.argv[1])
 
-    btn = [k for k in kids(main_wnd) if cls(k) == 'Button' and '右键菜单' in text(k)]
-    if btn:
-        user32.SendMessageW(btn[0], BM_CLICK, 0, 0)
-        time.sleep(3)
-        menus = find_windows('SysCleanMenuWnd')
-        if menus:
-            user32.SetForegroundWindow(menus[0])
-            time.sleep(0.5)
-            shoot(menus[0], sys.argv[2])
-            user32.PostMessageW(menus[0], 0x0010, 0, 0)
+    # 打开一个子窗口: 点按钮 -> 等窗口出现 -> 截图 -> 关掉
+    def open_and_shoot(btn_keyword, wnd_class, out_path, settle=1.0):
+        btn = [k for k in kids(main_wnd)
+               if cls(k) in ('Button', 'SysCleanBtn') and btn_keyword in text(k)]
+        print('%s button found: %d' % (btn_keyword, len(btn)))
+        if not btn:
+            return
+        wins = []
+        for attempt in range(4):
+            user32.SendMessageW(btn[0], BM_CLICK, 0, 0)
+            for _ in range(10):
+                time.sleep(0.5)
+                wins = find_windows(wnd_class)
+                if wins:
+                    break
+            if wins:
+                break
+            print('  retry %d' % (attempt + 1))
+        print('%s windows: %d' % (wnd_class, len(wins)))
+        if not wins:
+            return
+        user32.SetForegroundWindow(wins[0])
+        time.sleep(settle)
+        shoot(wins[0], out_path)
+        user32.PostMessageW(wins[0], 0x0010, 0, 0)
+        time.sleep(0.6)
+
+    open_and_shoot('右键菜单', 'SysCleanMenuWnd', sys.argv[2])
+    if len(sys.argv) > 3:
+        open_and_shoot('进程与线程', 'SysCleanThreadWnd', sys.argv[3], settle=1.5)
+
     user32.PostMessageW(main_wnd, 0x0010, 0, 0)
 
 
