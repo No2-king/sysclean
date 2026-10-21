@@ -245,6 +245,7 @@ static void SetPendingAction(int act, int count);
 static void ExecuteUninstall(void);
 static void ExecuteKillAll(void);
 static void HookHeader(HWND lv);
+static void HookScrollBar(HWND wnd);
 static void StyleListView(HWND lv);
 static void FitLastColumn(HWND lv, int lastIdx, int fixedSum);
 static int  SnapListHeight(HWND lv, int want);
@@ -291,6 +292,12 @@ static void ApplyTitleBarColor(HWND hwnd);
 #define C_OK          RGB(0x35, 0xC0, 0x78)
 #define C_WARN        RGB(0xE8, 0xA3, 0x3D)
 #define C_DANGER      RGB(0xE5, 0x54, 0x4B)
+
+/* 滚动条 (自绘: 轨道暗蓝 + 亮蓝胶囊滑块) */
+#define C_SB_TRACK    RGB(0x11, 0x2A, 0x49)
+#define C_SB_IDLE     RGB(0x24, 0x48, 0x77)   /* 内容不足一屏时的占位胶囊 */
+#define C_SB_THUMB    RGB(0x35, 0x74, 0xC8)
+#define C_SB_HOT      RGB(0x5A, 0x9B, 0xEE)
 
 /* 尺寸 */
 #define TOPBAR_H      76
@@ -3700,6 +3707,7 @@ static void CreateSelfPage(HWND hwnd)
     g_hLog = CreateWindowExW(0, L"EDIT", L"",
         WS_CHILD | WS_VSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL,
         0, 0, 100, 100, hwnd, (HMENU)ID_LOG, NULL, NULL);
+    HookScrollBar(g_hLog);
 
     for (i = 0; i < N_SELF_BTN; i++)
         g_hBtns[i] = UiButton(hwnd, btnId[i], btnText[i], btnKind[i], 0, 0, 10, 10);
@@ -3840,16 +3848,7 @@ static void PaintTopBar(HDC hdc, int w)
                DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     }
 
-    /* 权限徽章 */
-    {
-        const WCHAR *t = g_isAdmin ? L"管理员权限" : L"受限权限";
-        int bw = g_isAdmin ? 88 : 76;
-        SetRect(&r, w - UI_PAD - bw, 21, w - UI_PAD, 55);
-        UiRoundRect(hdc, &r, 10,
-                    g_isAdmin ? RGB(0x14, 0x5C, 0x3C) : RGB(0x6B, 0x42, 0x10), 0);
-        UiText(hdc, r.left, r.top, bw, 34, t, C_TEXT_ON, g_hFontSmall,
-               DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-    }
+    /* 权限状态只写日志, 顶栏不再放徽章 —— 深蓝底上那块绿色太跳 */
 }
 
 static int TabAt(int x, int y)
@@ -4217,6 +4216,162 @@ static void StyleListView(HWND lv)
     ListView_SetTextBkColor(lv, C_CARD);
     ListView_SetTextColor(lv, C_TEXT);
     HookHeader(lv);
+    HookScrollBar(lv);
+}
+
+/* ============================================================
+ * 自绘滚动条
+ *   系统滚动条在深蓝底上是一条刺眼的浅灰, 所以整条重画:
+ *   轨道暗蓝, 滑块亮蓝胶囊。
+ *   只换"画"不换"行为" —— 拖动 / 点轨道 / 滚轮 / 键盘仍由系统处理,
+ *   我们只在 WM_NCPAINT 之后盖一层上去; 几何位置直接用
+ *   GetScrollBarInfo 拿系统算好的矩形, 保证命中区和看到的一致。
+ * ============================================================ */
+
+static HWND g_sbHot;   /* 鼠标停在哪个控件的滚动条上 */
+
+static void RepaintNC(HWND wnd)
+{
+    if (wnd) RedrawWindow(wnd, NULL, NULL, RDW_FRAME | RDW_INVALIDATE);
+}
+
+static void DrawSbBar(HDC hdc, const RECT *track, HWND wnd, int bar)
+{
+    SCROLLINFO si;
+    RECT th;
+    int total, span, len, pos, vert;
+
+    FillRect(hdc, track, UiBrush(C_SB_TRACK));
+
+    vert = (bar == SB_VERT);
+    span = vert ? (track->bottom - track->top) : (track->right - track->left);
+    if (span <= 8) return;
+
+    th = *track;
+    if (vert) {
+        th.left  += 3;
+        th.right -= 3;
+    } else {
+        th.top    += 3;
+        th.bottom -= 3;
+    }
+
+    ZeroMemory(&si, sizeof(si));
+    si.cbSize = sizeof(si);
+    si.fMask  = SIF_RANGE | SIF_PAGE | SIF_POS;
+    if (!GetScrollInfo(wnd, bar, &si)) return;
+
+    total = si.nMax - si.nMin + 1;
+
+    /* 内容不足一屏 (或者滚动条被禁用): 画一条满长的暗色胶囊占位,
+       不要留一块空白, 否则和旁边的卡片对不上 */
+    if (si.nPage == 0 || total <= (int)si.nPage) {
+        UiRoundRect(hdc, &th,
+                    vert ? (th.right - th.left) / 2 : (th.bottom - th.top) / 2,
+                    C_SB_IDLE, 0);
+        return;
+    }
+
+    len = MulDiv(span, (int)si.nPage, total);
+    if (len < 26) len = 26;
+    if (len > span) len = span;
+
+    pos = MulDiv(span - len, si.nPos - si.nMin, total - (int)si.nPage);
+    if (pos < 0) pos = 0;
+    if (pos > span - len) pos = span - len;
+
+    if (vert) {
+        th.top    = track->top + pos + 1;
+        th.bottom = th.top + len - 2;
+        if (th.bottom > track->bottom - 1) th.bottom = track->bottom - 1;
+    } else {
+        th.left   = track->left + pos + 1;
+        th.right  = th.left + len - 2;
+        if (th.right > track->right - 1) th.right = track->right - 1;
+    }
+    if (th.right - th.left < 2 || th.bottom - th.top < 2) return;
+
+    UiRoundRect(hdc, &th,
+                vert ? (th.right - th.left) / 2 : (th.bottom - th.top) / 2,
+                (g_sbHot == wnd) ? C_SB_HOT : C_SB_THUMB, 0);
+}
+
+static void PaintDarkScrollBar(HWND wnd)
+{
+    SCROLLBARINFO sbi;
+    HDC hdc;
+
+    if (!wnd || !IsWindowVisible(wnd)) return;
+
+    hdc = GetWindowDC(wnd);
+    if (!hdc) return;
+
+    ZeroMemory(&sbi, sizeof(sbi));
+    sbi.cbSize = sizeof(sbi);
+    if (GetScrollBarInfo(wnd, OBJID_VSCROLL, &sbi) &&
+        !(sbi.rgstate[0] & STATE_SYSTEM_INVISIBLE)) {
+        RECT r = sbi.rcScrollBar;
+        MapWindowPoints(NULL, wnd, (POINT *)&r, 2);
+        DrawSbBar(hdc, &r, wnd, SB_VERT);
+    }
+
+    ZeroMemory(&sbi, sizeof(sbi));
+    sbi.cbSize = sizeof(sbi);
+    if (GetScrollBarInfo(wnd, OBJID_HSCROLL, &sbi) &&
+        !(sbi.rgstate[0] & STATE_SYSTEM_INVISIBLE)) {
+        RECT r = sbi.rcScrollBar;
+        MapWindowPoints(NULL, wnd, (POINT *)&r, 2);
+        DrawSbBar(hdc, &r, wnd, SB_HORZ);
+    }
+
+    ReleaseDC(wnd, hdc);
+}
+
+static LRESULT CALLBACK SbSubclassProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp,
+                                       UINT_PTR id, DWORD_PTR ref)
+{
+    LRESULT r = DefSubclassProc(wnd, msg, wp, lp);
+
+    switch (msg) {
+    case WM_NCPAINT:
+        PaintDarkScrollBar(wnd);
+        break;
+
+    /* 滚动之后系统会重画自己那条, 我们再盖回去 */
+    case WM_VSCROLL:
+    case WM_HSCROLL:
+    case WM_MOUSEWHEEL:
+    case WM_KEYDOWN:
+    case WM_LBUTTONUP:
+    case WM_SIZE:
+        RepaintNC(wnd);
+        break;
+
+    case WM_NCMOUSEMOVE:
+        if (g_sbHot != wnd) {
+            g_sbHot = wnd;
+            RepaintNC(wnd);
+        }
+        break;
+
+    case WM_NCMOUSELEAVE:
+        if (g_sbHot == wnd) {
+            g_sbHot = NULL;
+            RepaintNC(wnd);
+        }
+        break;
+
+    case WM_NCDESTROY:
+        if (g_sbHot == wnd) g_sbHot = NULL;
+        RemoveWindowSubclass(wnd, SbSubclassProc, id);
+        break;
+    }
+    return r;
+}
+
+static void HookScrollBar(HWND wnd)
+{
+    if (wnd) SetWindowSubclass(wnd, SbSubclassProc, 2, 0);
 }
 
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)

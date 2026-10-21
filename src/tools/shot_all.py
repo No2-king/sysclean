@@ -50,6 +50,11 @@ def click_tab(hwnd, idx):
 
 
 def shoot(hwnd, out):
+    # 先强制重画一遍: 切页后如果只靠 SendMessage 触发的重绘, 偶尔会抓到
+    # 上一页的旧帧 (PrintWindow 拿的是 DWM 的重定向表面)
+    user32.RedrawWindow(hwnd, None, None, 0x0001 | 0x0100 | 0x0080 | 0x0400)
+    time.sleep(0.15)
+
     rc = wintypes.RECT()
     user32.GetWindowRect(hwnd, ctypes.byref(rc))
     w, h = rc.right - rc.left, rc.bottom - rc.top
