@@ -41,7 +41,7 @@ SysClean 做的是：**把选中的程序连根拔掉** —— 关进程 → 删
 
 ## 下载 & 运行
 
-1. 去 [Releases](../../releases) 或直接下仓库里的 `dist/` 目录
+1. 去 [Releases](https://github.com/No2-king/sysclean/releases) 或直接下仓库里的 `dist/` 目录
 2. 64 位系统（现在基本都是）用 **`dist/SysClean.exe`**
 3. 老 Win7 32 位机器用 **`dist/SysClean_x86.exe`**
 4. 双击运行，UAC 弹窗点「是」
