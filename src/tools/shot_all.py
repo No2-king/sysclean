@@ -5,7 +5,7 @@
 
     python src/tools/shot_all.py docs/preview.png docs/preview_proc.png docs/preview_menu.png
 
-三个参数分别是: 自身功能页 / 进程管理页 / 右键菜单页。
+三个参数分别是: 首页页 / 进程管理页 / 右键菜单页。
 标签栏的三个标签是父窗口自绘的, 没有子控件, 所以用 WM_LBUTTONDOWN 直接点坐标。
 """
 import ctypes, ctypes.wintypes as wt, time, zlib, struct, sys, os
@@ -122,7 +122,7 @@ def main():
 
     click_tab(w, 0)          # 显式回到第 1 页, 防止启动时的残留点击落在标签栏
     time.sleep(0.8)
-    shoot(w, sys.argv[1])    # 第 1 页: 自身功能
+    shoot(w, sys.argv[1])    # 第 1 页: 首页
 
     if len(sys.argv) > 2:
         click_tab(w, 1)      # 进程管理

@@ -207,7 +207,7 @@ static RECT  g_rcStatCard, g_rcListCard, g_rcLogCard, g_rcActionBar, g_rcTopBar;
 #define PAGE_SELF     0
 #define PAGE_PROC     1
 #define PAGE_MENU     2
-#define N_SELF_BTN    4      /* 自身功能页底部按钮数 */
+#define N_SELF_BTN    4      /* 首页页底部按钮数 */
 
 static int   g_page = PAGE_SELF;
 static int   g_tabHot = -1;
@@ -246,6 +246,7 @@ static void ExecuteUninstall(void);
 static void ExecuteKillAll(void);
 static void HookHeader(HWND lv);
 static void HookScrollBar(HWND wnd);
+static void RepaintNC(HWND wnd);
 static void StyleListView(HWND lv);
 static void FitLastColumn(HWND lv, int lastIdx, int fixedSum);
 static int  SnapListHeight(HWND lv, int want);
@@ -260,7 +261,7 @@ static void ApplyTitleBarColor(HWND hwnd);
  * 设计约束:
  *   1. 全部自绘, 不用系统默认控件外观, 才能做到视觉统一
  *   2. 整窗统一深蓝色调, 没有白底区块
- *   3. 顶部三个标签页 (自身功能 / 进程管理 / 右键菜单), 点击切换下方内容
+ *   3. 顶部三个标签页 (首页 / 进程管理 / 右键菜单), 点击切换下方内容
  *   4. 操作按钮统一沉到底部操作栏
  *   5. 不弹任何对话框, 确认走底部内嵌确认条
  * ============================================================ */
@@ -295,7 +296,6 @@ static void ApplyTitleBarColor(HWND hwnd);
 
 /* 滚动条 (自绘: 轨道暗蓝 + 亮蓝胶囊滑块) */
 #define C_SB_TRACK    RGB(0x11, 0x2A, 0x49)
-#define C_SB_IDLE     RGB(0x24, 0x48, 0x77)   /* 内容不足一屏时的占位胶囊 */
 #define C_SB_THUMB    RGB(0x35, 0x74, 0xC8)
 #define C_SB_HOT      RGB(0x5A, 0x9B, 0xEE)
 
@@ -571,6 +571,10 @@ static void Log(LPCWSTR fmt, ...)
     SendMessageW(g_hLog, EM_SETSEL, (WPARAM)len, (LPARAM)len);
     SendMessageW(g_hLog, EM_REPLACESEL, FALSE, (LPARAM)buf);
     SendMessageW(g_hLog, EM_REPLACESEL, FALSE, (LPARAM)L"\r\n");
+
+    /* 日志涨过一屏之后滚动条才会出现, 而 Edit 不会通知我们,
+       所以每追加一行就重画一次非客户区, 让滚动条及时跟上 */
+    RepaintNC(g_hLog);
 }
 
 static void Status(LPCWSTR text)
@@ -3667,7 +3671,7 @@ static void CreateUiFonts(void)
         DEFAULT_PITCH | FF_DONTCARE, face);
 }
 
-/* ---------- 第 1 页: 自身功能 (程序列表 / 卸载 / 日志) ---------- */
+/* ---------- 第 1 页: 首页 (程序列表 / 卸载 / 日志) ---------- */
 static void CreateSelfPage(HWND hwnd)
 {
     static const WCHAR *btnText[] = {
@@ -3811,7 +3815,7 @@ static void PaintSelfPage(HDC hdc)
 
 static void PaintTopBar(HDC hdc, int w)
 {
-    static const WCHAR *tabText[3] = { L"自身功能", L"进程管理", L"右键菜单" };
+    static const WCHAR *tabText[3] = { L"首页", L"进程管理", L"右键菜单" };
     RECT r;
     int i;
 
@@ -3989,7 +3993,7 @@ static void PaintMain(HWND hwnd, HDC hdc)
     SetRect(&r, 0, g_rcActionBar.top, w, g_rcActionBar.top + 1);
     FillRect(hdc, &r, UiBrush(C_BORDER));
 
-    /* 只有自身功能页在操作栏里画状态文字, 另两页用的是提示条 STATIC */
+    /* 只有首页页在操作栏里画状态文字, 另两页用的是提示条 STATIC */
     if (g_page == PAGE_SELF) {
         if (g_pendingAction) {
             UiText(hdc, UI_PAD, g_rcActionBar.top + 15, 640, 20,
@@ -4241,8 +4245,6 @@ static void DrawSbBar(HDC hdc, const RECT *track, HWND wnd, int bar)
     RECT th;
     int total, span, len, pos, vert;
 
-    FillRect(hdc, track, UiBrush(C_SB_TRACK));
-
     vert = (bar == SB_VERT);
     span = vert ? (track->bottom - track->top) : (track->right - track->left);
     if (span <= 8) return;
@@ -4259,18 +4261,21 @@ static void DrawSbBar(HDC hdc, const RECT *track, HWND wnd, int bar)
     ZeroMemory(&si, sizeof(si));
     si.cbSize = sizeof(si);
     si.fMask  = SIF_RANGE | SIF_PAGE | SIF_POS;
-    if (!GetScrollInfo(wnd, bar, &si)) return;
+    if (!GetScrollInfo(wnd, bar, &si)) {
+        FillRect(hdc, track, UiBrush(C_CARD));
+        return;
+    }
 
     total = si.nMax - si.nMin + 1;
 
-    /* 内容不足一屏 (或者滚动条被禁用): 画一条满长的暗色胶囊占位,
-       不要留一块空白, 否则和旁边的卡片对不上 */
+    /* 内容不足一屏: 干脆当没有滚动条 —— 轨道直接铺成卡片底色。
+       之前是画一条满长的暗色胶囊, 结果日志框右边像戳了根柱子。 */
     if (si.nPage == 0 || total <= (int)si.nPage) {
-        UiRoundRect(hdc, &th,
-                    vert ? (th.right - th.left) / 2 : (th.bottom - th.top) / 2,
-                    C_SB_IDLE, 0);
+        FillRect(hdc, track, UiBrush(C_CARD));
         return;
     }
+
+    FillRect(hdc, track, UiBrush(C_SB_TRACK));
 
     len = MulDiv(span, (int)si.nPage, total);
     if (len < 26) len = 26;

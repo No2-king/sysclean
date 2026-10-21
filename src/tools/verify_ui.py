@@ -134,9 +134,9 @@ def main():
     check(len(eds) == 1, '1 个日志 Edit')
     check(len(sts) == 2, '2 个提示条 STATIC (进程页 / 菜单页)')
 
-    # ---- 第 1 页: 自身功能 ----
+    # ---- 第 1 页: 首页 ----
     print()
-    print('--- 第 1 页 自身功能 ---')
+    print('--- 第 1 页 首页 ---')
     click_tab(mw, 0)
     time.sleep(1.2)
     vis_btn = [k for k in btns if visible(k)]
@@ -149,9 +149,9 @@ def main():
         print('   %-10s x=%4d y=%4d w=%3d h=%2d' %
               (text(k), r[0], r[1], r[2] - r[0], r[3] - r[1]))
 
-    check(len(vis_btn) == 4, '自身功能页 4 个按钮 (确认/取消默认隐藏)')
-    check(len(vis_lv) == 1, '自身功能页 1 个 ListView')
-    check(len(vis_ed) == 1, '自身功能页显示日志')
+    check(len(vis_btn) == 4, '首页 4 个按钮 (确认/取消默认隐藏)')
+    check(len(vis_lv) == 1, '首页 1 个 ListView')
+    check(len(vis_ed) == 1, '首页显示日志')
 
     if vis_btn:
         maxb = max(rect(k, mw)[3] for k in vis_btn)
